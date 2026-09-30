@@ -29,23 +29,6 @@ from pydantic import BaseModel, Field, model_validator
 app = FastAPI(title="ApartCare2 API", version="6.5.13")
 
 
-@app.middleware("http")
-async def vercel_api_prefix_middleware(request: Request, call_next):
-    """Map Vercel's public /api/* service path to the backend's existing routes.
-
-    The frontend already calls /api/... while the FastAPI application historically
-    defines routes such as /account/create and /platform/login. Vercel Services
-    preserves the /api prefix when rewriting to the backend, so strip it at the
-    ASGI boundary instead of changing hundreds of existing route declarations.
-    Direct local FastAPI usage on port 8000 is unchanged.
-    """
-    path = request.scope.get("path", "")
-    if os.getenv("VERCEL") and (path == "/api" or path.startswith("/api/")):
-        request.scope["path"] = path[4:] or "/"
-        request.scope["raw_path"] = request.scope["path"].encode("utf-8")
-    return await call_next(request)
-
-
 RUNTIME_DIR = Path(os.getenv('APARTCARE_RUNTIME_DIR', '/tmp/apartcare' if os.getenv('VERCEL') else str(Path(__file__).resolve().parent)))
 RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR = Path(os.getenv('APARTCARE_UPLOAD_DIR', str(RUNTIME_DIR / 'uploads')))

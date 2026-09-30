@@ -1,2 +1,2 @@
-6.5.13
-Core Functionality Fix 2 - Vercel Services API Routing
+ApartCare Lite V6.5.13
+Core Functionality Fix 1 — Vercel API Routing / Account Creation
