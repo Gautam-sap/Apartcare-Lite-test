@@ -1,0 +1,29 @@
+APARTCARE LITE V6.5.13 — CORE FUNCTIONALITY FIX 2
+
+1. Commit/upload the CONTENTS of this package to the same GitHub folder that contains:
+   app/
+   backend/
+   public/
+   package.json
+   vercel.json
+
+2. In Vercel:
+   - Framework Preset: Services
+   - Root Directory: the folder containing vercel.json
+   - Keep existing Production/Preview database environment variables.
+   - Redeploy from the new commit.
+
+3. Test in this order:
+   https://<deployment>/api/health
+   https://<deployment>/api/account/status
+   https://<deployment>/api/platform/status
+
+Expected: JSON responses, not 404 and not FUNCTION_INVOCATION_FAILED.
+
+4. Then create Platform Owner.
+
+5. Then create Apartment Account.
+
+6. Then test Admin login.
+
+Do not make further UI/CSS changes while these API tests are failing.
