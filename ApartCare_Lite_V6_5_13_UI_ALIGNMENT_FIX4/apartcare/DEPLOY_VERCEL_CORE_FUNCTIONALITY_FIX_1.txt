@@ -1,0 +1,28 @@
+APARTCARE LITE V6.5.13 — CORE FUNCTIONALITY FIX 1
+
+ROOT CAUSE
+The browser was posting to /api/account/create, but the deployment was serving that URL through Next.js instead of the FastAPI backend. The result was a Next.js 404. The account creation handler itself exists.
+
+DEPLOYMENT ARCHITECTURE
+- Next.js frontend service: /
+- FastAPI backend service: /api
+- Vercel Services routing sends /api/* to FastAPI.
+- FastAPI service routes are backend-relative (for example /account/create).
+
+VERCEL DASHBOARD
+1. Open Project Settings -> General.
+2. Root Directory must be the folder containing package.json, app, backend and vercel.json.
+3. Framework Preset must be Services for this build.
+4. Keep all existing Production/Preview environment variables.
+5. Redeploy from the Git commit containing this fix.
+
+POST-DEPLOY TESTS
+A. Open https://<deployment>/api/health
+   Expected: JSON containing status=ok and version=6.5.13.
+B. Open https://<deployment>/api/account/status
+   Expected: JSON containing initialized and tenant_count.
+C. Use Create Apartment Account in the UI.
+   The request must no longer show Next.js 404. It should return either 201 on success or a validation/conflict message from FastAPI.
+
+DO NOT change CSS/UI alignment in this fix.
+DO NOT change tenant-isolation or financial calculations.
