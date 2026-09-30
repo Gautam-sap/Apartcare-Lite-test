@@ -3645,7 +3645,7 @@ DB_STATE_TABLE = 'apartcare_state'
 def _db_connect():
     if not DATABASE_URL:
         return None
-    return psycopg.connect(DATABASE_URL, connect_timeout=10, sslmode='require')
+    return psycopg.connect(DATABASE_URL, connect_timeout=3, sslmode='require')
 
 def _ensure_db_state_table():
     conn = _db_connect()
@@ -3789,12 +3789,17 @@ def _load_state():
         # requested endpoint is reached. Mutating endpoints persist explicitly.
     except Exception as e: print('ApartCare state load warning:',e)
 
-_load_state()
-_default_plan_seed()
-_migrate_legacy_subscriptions()
-# Local development may persist migrations; Vercel must remain read-only at import.
+# IMPORTANT: Never load Postgres state during module import on Vercel.
+# Vercel must be able to initialize the function before any database network call.
+# Production state is loaded by load_persistent_state_before_request middleware.
 if not os.getenv("VERCEL"):
+    _load_state()
+    _default_plan_seed()
+    _migrate_legacy_subscriptions()
     _save_state()
+else:
+    _default_plan_seed()
+    _migrate_legacy_subscriptions()
 
 @app.middleware("http")
 async def enforce_property_tenant_context(request, call_next):
