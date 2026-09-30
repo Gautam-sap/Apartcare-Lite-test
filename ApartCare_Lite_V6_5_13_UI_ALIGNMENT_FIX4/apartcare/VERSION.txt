@@ -1,2 +1,2 @@
 6.5.13
-UI Alignment Fix 5 - Platform Auth Overflow + Password Controls
+Core Functionality Fix 2 - Vercel Services API Routing

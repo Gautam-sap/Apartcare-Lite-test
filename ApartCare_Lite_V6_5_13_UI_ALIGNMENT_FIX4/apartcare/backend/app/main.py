@@ -29,6 +29,23 @@ from pydantic import BaseModel, Field, model_validator
 app = FastAPI(title="ApartCare2 API", version="6.5.13")
 
 
+@app.middleware("http")
+async def vercel_api_prefix_middleware(request: Request, call_next):
+    """Map Vercel's public /api/* service path to the backend's existing routes.
+
+    The frontend already calls /api/... while the FastAPI application historically
+    defines routes such as /account/create and /platform/login. Vercel Services
+    preserves the /api prefix when rewriting to the backend, so strip it at the
+    ASGI boundary instead of changing hundreds of existing route declarations.
+    Direct local FastAPI usage on port 8000 is unchanged.
+    """
+    path = request.scope.get("path", "")
+    if os.getenv("VERCEL") and (path == "/api" or path.startswith("/api/")):
+        request.scope["path"] = path[4:] or "/"
+        request.scope["raw_path"] = request.scope["path"].encode("utf-8")
+    return await call_next(request)
+
+
 RUNTIME_DIR = Path(os.getenv('APARTCARE_RUNTIME_DIR', '/tmp/apartcare' if os.getenv('VERCEL') else str(Path(__file__).resolve().parent)))
 RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR = Path(os.getenv('APARTCARE_UPLOAD_DIR', str(RUNTIME_DIR / 'uploads')))
@@ -555,7 +572,7 @@ def get_month_rows(apartment_id: str, month_key: str) -> list[MaintenanceRow]:
         key=lambda r: r.flat_no.lower()
     )
 
-@app.get("/api/health")
+@app.get("/health")
 def health():
     persistent = bool(DATABASE_URL)
     return {"status":"ok","version":"6.5.13","storage":"postgres" if persistent else "local","production_ready": persistent and (not os.getenv("VERCEL") or bool(os.getenv("BLOB_READ_WRITE_TOKEN")))}
@@ -571,11 +588,11 @@ def resident_version_for_month(apartment_id: str, flat_no: str, month_key: str|N
     candidates=[h for h in hist if h.effective_from and h.effective_from[:7] <= month_key]
     return max(candidates,key=lambda h:(h.version,h.effective_from)).version if candidates else min(hist,key=lambda h:(h.version,h.effective_from)).version
 
-@app.get("/api/residents", response_model=list[Resident])
+@app.get("/residents", response_model=list[Resident])
 def list_residents(apartment_id: str="demo-apartment"):
     return sorted([r for r in residents if r.apartment_id==apartment_id],key=lambda r:r.flat_no.lower())
 
-@app.get("/api/residents/{resident_id}/history", response_model=list[FlatHistory])
+@app.get("/residents/{resident_id}/history", response_model=list[FlatHistory])
 def resident_record_history(resident_id: str, apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
     actor = _current_actor(x_apartcare_token)
     resolved = _resolved_actor_tenant(x_apartcare_token, apartment_id)
@@ -583,7 +600,7 @@ def resident_record_history(resident_id: str, apartment_id: str = "demo-apartmen
     if not resident: raise HTTPException(status_code=404,detail="Resident not found")
     return resident_history_for_flat(resident.apartment_id,resident.flat_no)
 
-@app.post("/api/residents", response_model=Resident, status_code=201)
+@app.post("/residents", response_model=Resident, status_code=201)
 def create_resident(data: ResidentInput, x_apartcare_token: str | None = Header(default=None)):
     _require_write_role(x_apartcare_token)
     if any(r.apartment_id==data.apartment_id and r.flat_no.lower()==data.flat_no.lower() for r in residents):
@@ -592,7 +609,7 @@ def create_resident(data: ResidentInput, x_apartcare_token: str | None = Header(
     flat_history.append(FlatHistory(id=str(uuid4()),apartment_id=data.apartment_id,flat_no=data.flat_no,owner_name=data.owner_name,resident_name=data.resident_name,resident_type=data.resident_type,mobile_no=data.mobile_no,email=data.email,status=data.status,remarks=data.remarks,effective_from=date.today().isoformat(),effective_to=None,version=1,change_reason="Initial resident record"))
     return resident
 
-@app.put("/api/residents/{resident_id}", response_model=Resident)
+@app.put("/residents/{resident_id}", response_model=Resident)
 def update_resident(resident_id: str,data: ResidentInput, x_apartcare_token: str | None = Header(default=None)):
     actor = _require_write_role(x_apartcare_token)
     tenant_id = _actor_apartment_id(actor)
@@ -612,7 +629,7 @@ def update_resident(resident_id: str,data: ResidentInput, x_apartcare_token: str
             return updated
     raise HTTPException(status_code=404,detail="Resident not found")
 
-@app.delete("/api/residents/{resident_id}")
+@app.delete("/residents/{resident_id}")
 def delete_resident(resident_id: str, x_apartcare_token: str | None = Header(default=None)):
     _require_write_role(x_apartcare_token)
     raise HTTPException(status_code=405,detail="Resident deletion is disabled. Edit the resident and review the retained version history instead.")
@@ -826,19 +843,19 @@ def ensure_global_month_editable(apartment_id: str, month_key: str):
     """Global financial month lock used by Maintenance and Expenses as well as Payments."""
     ensure_payment_month_editable(apartment_id, month_key)
 
-@app.get("/api/payments/lock-status")
+@app.get("/payments/lock-status")
 def payment_lock_status(month_key: str, apartment_id: str = "demo-apartment"):
     if not month_key_valid(month_key):
         raise HTTPException(status_code=400, detail="Month must be YYYY-MM")
     lock = payment_month_lock(apartment_id, month_key)
     return {"apartment_id": apartment_id, "month_key": month_key, "locked": bool(lock and lock.get("locked")), "lock": lock}
 
-@app.get("/api/payments/lock-history")
+@app.get("/payments/lock-history")
 def payment_lock_history(month_key: str|None = None, apartment_id: str = "demo-apartment"):
     rows=[h for h in payment_lock_events if h.get("apartment_id")==apartment_id and (not month_key or h.get("month_key")==month_key)]
     return sorted(rows,key=lambda h:h.get("at", ""),reverse=True)
 
-@app.post("/api/payments/lock")
+@app.post("/payments/lock")
 def lock_payment_month(data: PaymentMonthLockInput, x_apartcare_token: str|None = Header(default=None)):
     actor=_require_role(x_apartcare_token,{"Admin"})
     if not month_key_valid(data.month_key):
@@ -854,7 +871,7 @@ def lock_payment_month(data: PaymentMonthLockInput, x_apartcare_token: str|None 
     _save_state()
     return lock
 
-@app.post("/api/payments/unlock")
+@app.post("/payments/unlock")
 def unlock_payment_month(data: PaymentMonthLockInput, x_apartcare_token: str|None = Header(default=None)):
     actor=_require_role(x_apartcare_token,{"Admin"})
     if not month_key_valid(data.month_key):
@@ -868,7 +885,7 @@ def unlock_payment_month(data: PaymentMonthLockInput, x_apartcare_token: str|Non
     _save_state()
     return existing
 
-@app.get("/api/payments", response_model=list[Payment])
+@app.get("/payments", response_model=list[Payment])
 def list_payments(month_key: str, apartment_id: str = "demo-apartment"):
     if not month_key_valid(month_key):
         raise HTTPException(status_code=400, detail="Month must be YYYY-MM")
@@ -903,7 +920,7 @@ def list_payments(month_key: str, apartment_id: str = "demo-apartment"):
         ))
     return sorted(result, key=lambda p: p.flat_no.lower())
 
-@app.post("/api/payments", response_model=Payment)
+@app.post("/payments", response_model=Payment)
 def record_payment(data: PaymentInput, x_apartcare_token: str | None = Header(default=None)):
     _require_write_role(x_apartcare_token)
     ensure_payment_month_editable(data.apartment_id, data.month_key)
@@ -951,7 +968,7 @@ def record_payment(data: PaymentInput, x_apartcare_token: str | None = Header(de
     payments.append(payment)
     return payment
 
-@app.put("/api/payments", response_model=Payment)
+@app.put("/payments", response_model=Payment)
 def save_or_correct_payment(data: PaymentInput, x_apartcare_token: str | None = Header(default=None)):
     _require_write_role(x_apartcare_token)
     ensure_payment_month_editable(data.apartment_id, data.month_key)
@@ -1009,7 +1026,7 @@ def save_or_correct_payment(data: PaymentInput, x_apartcare_token: str | None = 
     payments.append(payment)
     return payment
 
-@app.get("/api/payments/summary")
+@app.get("/payments/summary")
 def payments_summary(month_key: str, apartment_id: str = "demo-apartment"):
     normalize_payments()
     rows = get_month_rows(apartment_id, month_key)
@@ -1028,7 +1045,7 @@ def payments_summary(month_key: str, apartment_id: str = "demo-apartment"):
         "payment_count": sum(1 for p in payments if p.apartment_id == apartment_id and p.month_key == month_key)
     }
 
-@app.get("/api/dashboard/kpis")
+@app.get("/dashboard/kpis")
 def dashboard_kpis(month_key: str | None = None, year: str | None = None, period: str = "Monthly", apartment_id: str = "demo-apartment"):
     normalize_payments()
     # Dashboard supports both month and year selections. Always calculate from
@@ -1081,7 +1098,7 @@ def dashboard_kpis(month_key: str | None = None, year: str | None = None, period
 
 
 # ---------- Expenses / Fund Management ----------
-@app.get("/api/expenses", response_model=list[Expense])
+@app.get("/expenses", response_model=list[Expense])
 def list_expenses(month_key: str, apartment_id: str = "demo-apartment"):
     if not month_key_valid(month_key):
         raise HTTPException(status_code=400, detail="Month must be YYYY-MM")
@@ -1089,13 +1106,13 @@ def list_expenses(month_key: str, apartment_id: str = "demo-apartment"):
     # every financial total by expense_is_countable(), and the UI disables actions.
     return [e for e in expenses if e.apartment_id==apartment_id and e.month_key==month_key]
 
-@app.get("/api/expenses/summary", response_model=ExpenseSummary)
+@app.get("/expenses/summary", response_model=ExpenseSummary)
 def expenses_summary(month_key: str, apartment_id: str = "demo-apartment"):
     if not month_key_valid(month_key):
         raise HTTPException(status_code=400, detail="Month must be YYYY-MM")
     return ExpenseSummary(**expense_summary_data(apartment_id, month_key))
 
-@app.post("/api/expenses", response_model=Expense, status_code=201)
+@app.post("/expenses", response_model=Expense, status_code=201)
 def create_expense(data: ExpenseInput, x_apartcare_token: str | None = Header(default=None)):
     _require_write_role(x_apartcare_token)
     # A Payment month lock is the global financial freeze.
@@ -1114,7 +1131,7 @@ def create_expense(data: ExpenseInput, x_apartcare_token: str | None = Header(de
     _save_state()
     return expense
 
-@app.put("/api/expenses/{expense_id}", response_model=Expense)
+@app.put("/expenses/{expense_id}", response_model=Expense)
 def update_expense(expense_id: str, data: ExpenseInput, x_apartcare_token: str | None = Header(default=None)):
     actor = _require_write_role(x_apartcare_token)
     tenant_id = _actor_apartment_id(actor)
@@ -1136,7 +1153,7 @@ def update_expense(expense_id: str, data: ExpenseInput, x_apartcare_token: str |
             return updated
     raise HTTPException(status_code=404, detail="Expense not found")
 
-@app.delete("/api/expenses/{expense_id}")
+@app.delete("/expenses/{expense_id}")
 def delete_expense(expense_id: str, reason: str = "", x_apartcare_token: str | None = Header(default=None)):
     actor = _require_role(x_apartcare_token, {"Admin"})
     tenant_id = _actor_apartment_id(actor)
@@ -1163,7 +1180,7 @@ def delete_expense(expense_id: str, reason: str = "", x_apartcare_token: str | N
         return {"deleted": True, "soft_delete": True, "expense_id": expense.id, "deleted_at": now, "justification": reason, "history_id": event["id"]}
     raise HTTPException(status_code=404, detail="Expense not found")
 
-@app.get("/api/expenses/history", response_model=list[ExpenseDeletionHistory])
+@app.get("/expenses/history", response_model=list[ExpenseDeletionHistory])
 def expense_history(month_key: str | None = None, apartment_id: str = "demo-apartment"):
     rows = []
     seen = set()
@@ -1189,16 +1206,16 @@ def expense_history(month_key: str | None = None, apartment_id: str = "demo-apar
     return sorted(rows, key=lambda e: (e.deleted_at, e.expense_date), reverse=True)
 
 # Legacy endpoint retained for compatibility; monthly expense creation is automatic.
-@app.post("/api/expenses/generate-watchman", response_model=Expense | None)
+@app.post("/expenses/generate-watchman", response_model=Expense | None)
 def generate_watchman_expense(month_key: str, apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
     _require_write_role(x_apartcare_token)
     return ensure_watchman_expense(apartment_id, month_key)
 
-@app.get("/api/expenses/lock-history")
+@app.get("/expenses/lock-history")
 def expense_lock_history(month_key: str|None=None, category: str="", apartment_id: str="demo-apartment"):
     return sorted([h for h in expense_lock_events if h.get("apartment_id")==apartment_id and (not month_key or h.get("month_key")==month_key) and (not category or h.get("category")==category)], key=lambda h:h.get("at",""), reverse=True)
 
-@app.post("/api/expenses/{expense_id}/lock", response_model=Expense)
+@app.post("/expenses/{expense_id}/lock", response_model=Expense)
 def lock_expense(expense_id: str, locked: bool=True, reason: str="", x_apartcare_token: str|None=Header(default=None)):
     actor=_require_role(x_apartcare_token,{"Admin"}); tenant_id=_actor_apartment_id(actor); reason=reason.strip()
     if not reason: raise HTTPException(status_code=400,detail="Justification is mandatory for both lock and unlock actions.")
@@ -1217,22 +1234,22 @@ def lock_expense(expense_id: str, locked: bool=True, reason: str="", x_apartcare
     raise HTTPException(status_code=404,detail="Expense not found")
 
 # ---------- Settings / Operational Defaults ----------
-@app.get("/api/settings/charges", response_model=ChargeSettings)
+@app.get("/settings/charges", response_model=ChargeSettings)
 def get_charge_settings(apartment_id: str = "demo-apartment"):
     return charge_settings.get(apartment_id, ChargeSettings(apartment_id=apartment_id))
 
-@app.get("/api/settings/charges/effective")
+@app.get("/settings/charges/effective")
 def get_effective_charge_settings(month_key: str, apartment_id: str = "demo-apartment"):
     if not month_key_valid(month_key):
         raise HTTPException(status_code=400, detail="Month must be YYYY-MM")
     maint,cca,effective=effective_charge_defaults(apartment_id,month_key)
     return {"tenant_id":apartment_id,"apartment_id":apartment_id,"month_key":month_key,"common_maintenance":maint,"cca":cca,"effective_month":effective}
 
-@app.get("/api/settings/charge-history", response_model=list[ChargeHistory])
+@app.get("/settings/charge-history", response_model=list[ChargeHistory])
 def get_charge_history(apartment_id: str = "demo-apartment"):
     return sorted([h for h in charge_history if h.apartment_id==apartment_id], key=lambda h:(h.effective_month,h.version,h.changed_at), reverse=True)
 
-@app.put("/api/settings/charges", response_model=ChargeSettings)
+@app.put("/settings/charges", response_model=ChargeSettings)
 def save_charge_settings(data: ChargeSettings, effective_month: str = "", x_apartcare_token: str | None = Header(default=None)):
     actor=_require_role(x_apartcare_token,{"Admin"})
     apartment_id=_actor_apartment_id(actor)
@@ -1252,7 +1269,7 @@ def save_charge_settings(data: ChargeSettings, effective_month: str = "", x_apar
     _save_state()
     return data
 
-@app.post("/api/settings/apartment-photo", response_model=ChargeSettings)
+@app.post("/settings/apartment-photo", response_model=ChargeSettings)
 def save_apartment_photo(data: ApartmentPhotoInput, x_apartcare_token: str | None = Header(default=None)):
     _require_role(x_apartcare_token,{"Admin"})
     try:
@@ -1306,11 +1323,11 @@ async def serve_uploaded_file(filename: str):
     return FileResponse(target)
 
 # ---------- Settings: Watchman and Go-Live ----------
-@app.get("/api/settings/watchmen", response_model=list[Watchman])
+@app.get("/settings/watchmen", response_model=list[Watchman])
 def list_watchmen(apartment_id: str = "demo-apartment", include_deleted: bool = False):
     return [w for w in watchmen if w.apartment_id == apartment_id and (include_deleted or not w.deleted)]
 
-@app.post("/api/settings/watchmen", response_model=Watchman, status_code=201)
+@app.post("/settings/watchmen", response_model=Watchman, status_code=201)
 def create_watchman(data: WatchmanInput, x_apartcare_token: str | None = Header(default=None)):
     _require_write_role(x_apartcare_token)
     row = Watchman(id=str(uuid4()), **data.model_dump())
@@ -1319,7 +1336,7 @@ def create_watchman(data: WatchmanInput, x_apartcare_token: str | None = Header(
     _save_state()
     return row
 
-@app.put("/api/settings/watchmen/{watchman_id}", response_model=Watchman)
+@app.put("/settings/watchmen/{watchman_id}", response_model=Watchman)
 def update_watchman(watchman_id: str, data: WatchmanInput, x_apartcare_token: str | None = Header(default=None)):
     actor = _require_write_role(x_apartcare_token)
     tenant_id = _actor_apartment_id(actor)
@@ -1334,7 +1351,7 @@ def update_watchman(watchman_id: str, data: WatchmanInput, x_apartcare_token: st
             return updated
     raise HTTPException(status_code=404, detail="Watchman not found")
 
-@app.post("/api/settings/watchmen/{watchman_id}/lock", response_model=Watchman)
+@app.post("/settings/watchmen/{watchman_id}/lock", response_model=Watchman)
 def lock_watchman(watchman_id: str, locked: bool = True, reason: str = "", x_apartcare_token: str | None = Header(default=None)):
     actor = _require_role(x_apartcare_token,{"Admin"})
     tenant_id = _actor_apartment_id(actor)
@@ -1349,7 +1366,7 @@ def lock_watchman(watchman_id: str, locked: bool = True, reason: str = "", x_apa
             return w
     raise HTTPException(status_code=404, detail="Watchman not found")
 
-@app.delete("/api/settings/watchmen/{watchman_id}")
+@app.delete("/settings/watchmen/{watchman_id}")
 def soft_delete_watchman(watchman_id: str, reason: str = "Soft deleted by user", x_apartcare_token: str | None = Header(default=None)):
     actor = _require_role(x_apartcare_token,{"Admin"})
     tenant_id = _actor_apartment_id(actor)
@@ -1361,7 +1378,7 @@ def soft_delete_watchman(watchman_id: str, reason: str = "Soft deleted by user",
             return {"deleted": True, "soft_delete": True}
     raise HTTPException(status_code=404, detail="Watchman not found")
 
-@app.get("/api/settings/watchmen/history")
+@app.get("/settings/watchmen/history")
 def get_watchman_history(apartment_id: str = "demo-apartment"):
     ids={w.id for w in watchmen if w.apartment_id==apartment_id}
     return [h for h in watchman_history if h["watchman_id"] in ids]
@@ -1401,14 +1418,14 @@ def _require_utility_edit_role(x_apartcare_token: str | None) -> AdminUser:
         raise HTTPException(status_code=403, detail="Utilities are editable only by Admin or Viewer.")
     return user
 
-@app.get("/api/utilities/categories", response_model=list[UtilityCategory])
+@app.get("/utilities/categories", response_model=list[UtilityCategory])
 def get_utility_categories(x_apartcare_token: str | None = Header(default=None)):
     actor=_utility_actor(x_apartcare_token)
     apartment_id=_actor_apartment_id(actor)
     _ensure_utility_categories()
     return sorted([c for c in utility_categories if c.apartment_id==apartment_id], key=lambda x:(not x.active, x.name.lower()))
 
-@app.post("/api/utilities/categories", response_model=UtilityCategory, status_code=201)
+@app.post("/utilities/categories", response_model=UtilityCategory, status_code=201)
 def create_utility_category(data: UtilityCategoryInput, x_apartcare_token: str | None = Header(default=None)):
     actor=_require_utility_edit_role(x_apartcare_token)
     apartment_id=_actor_apartment_id(actor)
@@ -1428,7 +1445,7 @@ def create_utility_category(data: UtilityCategoryInput, x_apartcare_token: str |
     utility_category_history.append(UtilityCategoryHistory(id=str(uuid4()),category_id=row.id,apartment_id=row.apartment_id,action="Created",name=row.name,changed_at=now,changed_by=actor.username))
     _save_state(); return row
 
-@app.put("/api/utilities/categories/{category_id}", response_model=UtilityCategory)
+@app.put("/utilities/categories/{category_id}", response_model=UtilityCategory)
 def update_utility_category(category_id: str, data: UtilityCategoryInput, x_apartcare_token: str | None = Header(default=None)):
     actor=_require_utility_edit_role(x_apartcare_token)
     _ensure_utility_categories()
@@ -1442,7 +1459,7 @@ def update_utility_category(category_id: str, data: UtilityCategoryInput, x_apar
     utility_category_history.append(UtilityCategoryHistory(id=str(uuid4()),category_id=row.id,apartment_id=row.apartment_id,action="Updated",name=f"{old} -> {name}",changed_at=row.updated_at,changed_by=actor.username))
     _save_state(); return row
 
-@app.post("/api/utilities/categories/{category_id}/deactivate", response_model=UtilityCategory)
+@app.post("/utilities/categories/{category_id}/deactivate", response_model=UtilityCategory)
 def deactivate_utility_category(category_id: str, x_apartcare_token: str | None = Header(default=None)):
     actor=_require_utility_edit_role(x_apartcare_token)
     row=next((c for c in utility_categories if c.id==category_id and c.apartment_id==_actor_apartment_id(actor)),None)
@@ -1451,17 +1468,17 @@ def deactivate_utility_category(category_id: str, x_apartcare_token: str | None 
     utility_category_history.append(UtilityCategoryHistory(id=str(uuid4()),category_id=row.id,apartment_id=row.apartment_id,action="Deactivated",name=row.name,changed_at=row.updated_at,changed_by=actor.username))
     _save_state(); return row
 
-@app.get("/api/utilities/categories/history", response_model=list[UtilityCategoryHistory])
+@app.get("/utilities/categories/history", response_model=list[UtilityCategoryHistory])
 def get_utility_category_history(x_apartcare_token: str | None = Header(default=None)):
     _utility_actor(x_apartcare_token); _ensure_utility_categories(); return sorted(utility_category_history,key=lambda x:x.changed_at,reverse=True)
 
-@app.get("/api/utilities/contacts", response_model=list[UtilityContact])
+@app.get("/utilities/contacts", response_model=list[UtilityContact])
 def get_utility_contacts(x_apartcare_token: str | None = Header(default=None)):
     actor=_utility_actor(x_apartcare_token)
     apartment_id=_actor_apartment_id(actor)
     return sorted([x for x in utility_contacts if x.apartment_id==apartment_id and not x.deleted], key=lambda x:(x.category.lower(), x.name.lower()))
 
-@app.post("/api/utilities/contacts", response_model=UtilityContact, status_code=201)
+@app.post("/utilities/contacts", response_model=UtilityContact, status_code=201)
 def create_utility_contact(data: UtilityContactInput, x_apartcare_token: str | None = Header(default=None)):
     actor=_require_utility_edit_role(x_apartcare_token)
     apartment_id=_actor_apartment_id(actor)
@@ -1478,7 +1495,7 @@ def create_utility_contact(data: UtilityContactInput, x_apartcare_token: str | N
     _save_state()
     return row
 
-@app.put("/api/utilities/contacts/{contact_id}", response_model=UtilityContact)
+@app.put("/utilities/contacts/{contact_id}", response_model=UtilityContact)
 def update_utility_contact(contact_id: str, data: UtilityContactInput, x_apartcare_token: str | None = Header(default=None)):
     actor=_require_utility_edit_role(x_apartcare_token)
     apartment_id=_actor_apartment_id(actor)
@@ -1493,7 +1510,7 @@ def update_utility_contact(contact_id: str, data: UtilityContactInput, x_apartca
     utility_contact_history.append(UtilityContactHistory(id=str(uuid4()),utility_contact_id=row.id,apartment_id=row.apartment_id,action="Updated",category=row.category,name=row.name,mobile_no=row.mobile_no,remarks=row.remarks,changed_at=row.updated_at,changed_by=actor.username))
     _save_state(); return row
 
-@app.delete("/api/utilities/contacts/{contact_id}")
+@app.delete("/utilities/contacts/{contact_id}")
 def delete_utility_contact(contact_id: str, x_apartcare_token: str | None = Header(default=None)):
     # Utilities are fully editable by Admin and Viewer.
     actor=_require_utility_edit_role(x_apartcare_token)
@@ -1504,7 +1521,7 @@ def delete_utility_contact(contact_id: str, x_apartcare_token: str | None = Head
     utility_contact_history.append(UtilityContactHistory(id=str(uuid4()),utility_contact_id=row.id,apartment_id=row.apartment_id,action="Deleted",category=row.category,name=row.name,mobile_no=row.mobile_no,remarks=row.remarks,changed_at=now,changed_by=actor.username))
     _save_state(); return {"message":"Utility contact deleted. History retained."}
 
-@app.get("/api/utilities/contacts/history", response_model=list[UtilityContactHistory])
+@app.get("/utilities/contacts/history", response_model=list[UtilityContactHistory])
 def get_utility_contact_history(x_apartcare_token: str | None = Header(default=None)):
     actor=_utility_actor(x_apartcare_token)
     apartment_id=_actor_apartment_id(actor)
@@ -1616,11 +1633,11 @@ def _financial_period_values(apartment_id: str, year: str):
     total_expenses = round(sum(r["expenses"] for r in active), 2)
     return rows, total_collected, total_expenses
 
-@app.get("/api/settings/opening-balance", response_model=OpeningBalance | None)
+@app.get("/settings/opening-balance", response_model=OpeningBalance | None)
 def get_opening_balance(apartment_id: str = "demo-apartment"):
     return opening_balances.get(apartment_id)
 
-@app.post("/api/settings/opening-balance", response_model=OpeningBalance)
+@app.post("/settings/opening-balance", response_model=OpeningBalance)
 def save_opening_balance(data: OpeningBalanceInput, x_apartcare_token: str | None = Header(default=None)):
     actor = _require_role(x_apartcare_token,{"Admin"})
     apartment_id = _actor_apartment_id(actor)
@@ -1634,7 +1651,7 @@ def save_opening_balance(data: OpeningBalanceInput, x_apartcare_token: str | Non
     opening_balance_history.append(OpeningBalanceHistory(id=str(uuid4()), apartment_id=apartment_id, go_live_month=row.go_live_month, opening_balance=row.opening_balance, action="Created" if not existing else "Updated", changed_at=row.saved_at, changed_by=actor.username))
     _save_state(); return row
 
-@app.post("/api/settings/opening-balance/unlock", response_model=OpeningBalance)
+@app.post("/settings/opening-balance/unlock", response_model=OpeningBalance)
 def unlock_opening_balance(justification: str = Body(..., embed=True), x_apartcare_token: str | None = Header(default=None)):
     actor=_require_role(x_apartcare_token,{"Admin"})
     apartment_id = _actor_apartment_id(actor)
@@ -1649,7 +1666,7 @@ def unlock_opening_balance(justification: str = Body(..., embed=True), x_apartca
     _audit(actor.username,"Success","Go-Live Opening Balance Unlock",f"Unlocked {row.go_live_month}; {row.opening_balance}; {justification}",actor.id)
     _save_state(); return row
 
-@app.post("/api/settings/opening-balance/lock", response_model=OpeningBalance)
+@app.post("/settings/opening-balance/lock", response_model=OpeningBalance)
 def lock_opening_balance(justification: str = Body(..., embed=True), x_apartcare_token: str | None = Header(default=None)):
     actor=_require_role(x_apartcare_token,{"Admin"})
     apartment_id = _actor_apartment_id(actor)
@@ -1663,12 +1680,12 @@ def lock_opening_balance(justification: str = Body(..., embed=True), x_apartcare
     _audit(actor.username,"Success","Go-Live Opening Balance Lock",f"Locked {row.go_live_month}; {row.opening_balance}; {justification}",actor.id)
     _save_state(); return row
 
-@app.get("/api/settings/opening-balance/history", response_model=list[OpeningBalanceHistory])
+@app.get("/settings/opening-balance/history", response_model=list[OpeningBalanceHistory])
 def get_opening_balance_history(apartment_id: str = "demo-apartment"):
     return [h for h in opening_balance_history if h.apartment_id==apartment_id]
 
 # ---------- Yearly Expense Reporting ----------
-@app.get("/api/expenses/yearly-summary")
+@app.get("/expenses/yearly-summary")
 def yearly_expense_summary(year: str, apartment_id: str = "demo-apartment"):
     if not (len(year) == 4 and year.isdigit()):
         raise HTTPException(status_code=400, detail="Year must be YYYY")
@@ -1696,7 +1713,7 @@ def yearly_expense_summary(year: str, apartment_id: str = "demo-apartment"):
         "category_totals": [{"category": c, "amount": round(sum(e.amount for e in rows if e.category == c), 2)} for c in categories],
     }
 
-@app.get("/api/expenses/yearly-details")
+@app.get("/expenses/yearly-details")
 def yearly_expense_details(year: str, category: str = "", apartment_id: str = "demo-apartment"):
     if not (len(year) == 4 and year.isdigit()):
         raise HTTPException(status_code=400, detail="Year must be YYYY")
@@ -1707,12 +1724,12 @@ def yearly_expense_details(year: str, category: str = "", apartment_id: str = "d
     return [e.model_dump() for e in rows]
 
 # ---------- Reports ----------
-@app.get("/api/reports/all-flats-monthly")
+@app.get("/reports/all-flats-monthly")
 def all_flats_monthly_report(month_key: str, apartment_id: str = "demo-apartment"):
     rows = get_month_rows(apartment_id, month_key)
     return {"month_key": month_key, "rows": [r.model_dump() for r in rows], "totals": {"maintenance": round(sum(r.maintenance for r in rows),2), "cca": round(sum(r.cca for r in rows),2), "diesel": round(sum(r.diesel for r in rows),2), "water_units": round(sum(r.water_units for r in rows),2), "water": round(sum(r.water_amount for r in rows),2), "total": round(sum(r.rounded_total for r in rows),2)}}
 
-@app.get("/api/reports/yearly-collection-expenses")
+@app.get("/reports/yearly-collection-expenses")
 def yearly_collection_expenses(year: str, apartment_id: str = "demo-apartment"):
     normalize_payments()
     rows, total_collected, total_expenses = _financial_period_values(apartment_id, year)
@@ -1730,7 +1747,7 @@ def yearly_collection_expenses(year: str, apartment_id: str = "demo-apartment"):
         "closing_balance": closing_at_period_end
     }
 
-@app.get("/api/reports/flats")
+@app.get("/reports/flats")
 def report_flats(apartment_id: str = "demo-apartment"):
     # Reports must include flats that exist in current residents as well as historical
     # maintenance/payment data. This prevents the report drop-down from becoming empty
@@ -1741,7 +1758,7 @@ def report_flats(apartment_id: str = "demo-apartment"):
     flats |= {p.flat_no for p in payments if p.apartment_id == apartment_id}
     return sorted(x for x in flats if x)
 
-@app.get("/api/reports/flat-statement")
+@app.get("/reports/flat-statement")
 def flat_statement(flat_no: str, apartment_id: str = "demo-apartment"):
     normalize_payments()
     resident_hist=[h.model_dump() for h in flat_history if h.apartment_id==apartment_id and h.flat_no==flat_no]
@@ -1752,13 +1769,13 @@ def flat_statement(flat_no: str, apartment_id: str = "demo-apartment"):
     latest = resident_hist[-1] if resident_hist else {}
     return {"flat_no":flat_no,"owner_name": (current.owner_name if current else latest.get("owner_name", "")),"resident_name": (current.resident_name if current else latest.get("resident_name", "")),"resident_history":resident_hist,"ledger":ledger}
 
-@app.get("/api/reports/individual-maintenance")
+@app.get("/reports/individual-maintenance")
 def individual_maintenance_report(flat_no: str, apartment_id: str = "demo-apartment"):
     rows = [r for r in maintenance_rows if r.apartment_id == apartment_id and r.flat_no == flat_no]
     rows.sort(key=lambda r: r.month_key)
     return [r.model_dump() for r in rows]
 
-@app.get("/api/reports/yearly-maintenance")
+@app.get("/reports/yearly-maintenance")
 def yearly_maintenance_report(year: str, apartment_id: str = "demo-apartment"):
     if not (len(year) == 4 and year.isdigit()):
         raise HTTPException(status_code=400, detail="Year must be YYYY")
@@ -1775,11 +1792,11 @@ def yearly_maintenance_report(year: str, apartment_id: str = "demo-apartment"):
 RESIDENT_TEMPLATE_NAME="ApartCare_Resident_Master_Import_Template.xlsx"
 HISTORICAL_TEMPLATE_NAME="ApartCare_Historical_Monthly_Data_Import_Template.xlsx"
 
-@app.get('/api/import/templates')
+@app.get('/import/templates')
 def list_import_templates():
     return {"version":"6.4.48","templates":[{"key":"resident-master","name":RESIDENT_TEMPLATE_NAME,"url":f"/templates/{RESIDENT_TEMPLATE_NAME}"},{"key":"historical-monthly","name":HISTORICAL_TEMPLATE_NAME,"url":f"/templates/{HISTORICAL_TEMPLATE_NAME}"}]}
 
-@app.get('/api/import/templates/{template_key}')
+@app.get('/import/templates/{template_key}')
 def download_import_template(template_key: str):
     mapping={"resident-master":RESIDENT_TEMPLATE_NAME,"historical-monthly":HISTORICAL_TEMPLATE_NAME}; name=mapping.get(template_key)
     if not name: raise HTTPException(status_code=404,detail="Unknown import template.")
@@ -1797,7 +1814,7 @@ def _num(v, field, row_no):
     except Exception:
         raise HTTPException(status_code=400, detail=f"Row {row_no}: {field} must be numeric")
 
-@app.post('/api/import/residents')
+@app.post('/import/residents')
 async def import_residents_excel(file: UploadFile = File(...), apartment_id: str = 'demo-apartment', x_apartcare_token: str | None = Header(default=None)):
     actor = _require_write_role(x_apartcare_token)
     if actor.tenant_id and apartment_id != actor.tenant_id:
@@ -1832,7 +1849,7 @@ async def import_residents_excel(file: UploadFile = File(...), apartment_id: str
         flat_history.append(FlatHistory(id=str(uuid4()), apartment_id=apartment_id, flat_no=flat, owner_name=owner, resident_name=resident, resident_type=typ, mobile_no=mobile, email=email, status=status, remarks=remarks, change_reason='Excel import'))
     return {'added':added,'updated':updated,'skipped':skipped,'invalid':invalid,'errors':errors[:20]}
 
-@app.post('/api/import/monthly-maintenance')
+@app.post('/import/monthly-maintenance')
 async def import_monthly_maintenance_excel(file: UploadFile = File(...), apartment_id: str = 'demo-apartment', historical: bool = Form(False), x_apartcare_token: str | None = Header(default=None)):
     actor = _require_write_role(x_apartcare_token)
     if actor.tenant_id and apartment_id != actor.tenant_id:
@@ -1895,17 +1912,17 @@ async def import_monthly_maintenance_excel(file: UploadFile = File(...), apartme
     return {'added':added,'skipped':skipped,'invalid':invalid,'payments_created':payments_created,'historical':historical,'months':sorted(imported_months),'errors':errors[:20]}
 
 # ---------- Monthly Maintenance ----------
-@app.get("/api/maintenance", response_model=list[MaintenanceRow])
+@app.get("/maintenance", response_model=list[MaintenanceRow])
 def list_maintenance(month_key: str, apartment_id: str = "demo-apartment"):
     if not month_key_valid(month_key):
         raise HTTPException(status_code=400, detail="Month must be YYYY-MM")
     return get_month_rows(apartment_id, month_key)
 
-@app.get("/api/maintenance/water-header", response_model=MonthWaterHeader | None)
+@app.get("/maintenance/water-header", response_model=MonthWaterHeader | None)
 def get_water_header(month_key: str, apartment_id: str = "demo-apartment"):
     return water_headers.get((apartment_id, month_key))
 
-@app.post("/api/maintenance/generate", response_model=list[MaintenanceRow])
+@app.post("/maintenance/generate", response_model=list[MaintenanceRow])
 def generate_maintenance(data: MaintenanceGenerateInput, x_apartcare_token: str | None = Header(default=None)):
     _require_write_role(x_apartcare_token)
     if not month_key_valid(data.month_key):
@@ -1971,7 +1988,7 @@ def generate_maintenance(data: MaintenanceGenerateInput, x_apartcare_token: str 
     _save_state()
     return get_month_rows(data.apartment_id, data.month_key)
 
-@app.put("/api/maintenance/{maintenance_id}", response_model=MaintenanceRow)
+@app.put("/maintenance/{maintenance_id}", response_model=MaintenanceRow)
 def update_maintenance(maintenance_id: str, data: MaintenanceUpdate, x_apartcare_token: str | None = Header(default=None)):
     actor = _require_write_role(x_apartcare_token)
     tenant_id = _actor_apartment_id(actor)
@@ -1989,7 +2006,7 @@ def update_maintenance(maintenance_id: str, data: MaintenanceUpdate, x_apartcare
             return row
     raise HTTPException(status_code=404, detail="Maintenance record not found")
 
-@app.put("/api/maintenance/water-header/{month_key}", response_model=MonthWaterHeader)
+@app.put("/maintenance/water-header/{month_key}", response_model=MonthWaterHeader)
 def update_water_header(month_key: str, data: MaintenanceGenerateInput, x_apartcare_token: str | None = Header(default=None)):
     _require_write_role(x_apartcare_token)
     ensure_global_month_editable(data.apartment_id, month_key)
@@ -2016,7 +2033,7 @@ def update_water_header(month_key: str, data: MaintenanceGenerateInput, x_apartc
     _save_state()
     return header
 
-@app.get("/api/maintenance/summary")
+@app.get("/maintenance/summary")
 def maintenance_summary(month_key: str, apartment_id: str = "demo-apartment"):
     rows = get_month_rows(apartment_id, month_key)
     header = water_headers.get((apartment_id, month_key))
@@ -2274,14 +2291,14 @@ def _require_write_role(token: str | None) -> AdminUser:
         raise HTTPException(status_code=403, detail="Viewer access is read-only. An Administrator is required to change property data.")
     return user
 
-@app.get("/api/admin/auth/session")
+@app.get("/admin/auth/session")
 def admin_session(x_apartcare_token: str | None = Header(default=None)):
     """Return the authenticated property session user. Used by the frontend to validate
     a persisted local session after a browser/backend restart before rendering controls."""
     user = _current_actor(x_apartcare_token)
     return {"user": user.model_dump(), "authenticated": True}
 
-@app.get("/api/account/status")
+@app.get("/account/status")
 def account_status():
     # Bootstrap-only endpoint. Never return one apartment's operational settings
     # before authentication; doing so can make a second tenant appear to own the
@@ -2292,7 +2309,7 @@ def account_status():
         "apartment": None,
     }
 
-@app.post("/api/account/create", status_code=201)
+@app.post("/account/create", status_code=201)
 def create_apartment_account(data: ApartmentAccountCreateInput, background_tasks: BackgroundTasks):
     """Self-service multi-apartment creation.
 
@@ -2363,7 +2380,7 @@ def create_apartment_account(data: ApartmentAccountCreateInput, background_tasks
     return {"user":admin,"token":"","account":_account_payload(account),"email_sent":None,"email_message":"Welcome email queued for delivery."}
 
 
-@app.post("/api/admin/auth/login", response_model=AuthLoginResponse)
+@app.post("/admin/auth/login", response_model=AuthLoginResponse)
 def admin_login(data: AdminLoginInput, account_id: str = ""):
     supplied_account=account_id.strip()
     # New multi-apartment accounts are authenticated by their own tenant record.
@@ -2425,7 +2442,7 @@ def admin_login(data: AdminLoginInput, account_id: str = ""):
     _audit(user.username, "Success", "Login", user_id=user.id)
     return AuthLoginResponse(user=user, token=token, account={"tenant_id":"demo-apartment","account_id":getattr(settings,"account_id",""),"apartment_name":settings.apartment_name})
 
-@app.post("/api/admin/auth/request-password-reset")
+@app.post("/admin/auth/request-password-reset")
 def request_password_reset(data: PasswordResetRequestInput):
     # Password recovery is tenant-scoped. The Account Number selects the tenant
     # before email/User ID lookup, so identical User IDs across apartments never
@@ -2467,7 +2484,7 @@ def request_password_reset(data: PasswordResetRequestInput):
     _save_state()
     return generic
 
-@app.post("/api/admin/auth/confirm-password-reset")
+@app.post("/admin/auth/confirm-password-reset")
 def confirm_password_reset(data: PasswordResetConfirmInput):
     record=password_reset_tokens.get(data.token)
     if not record or record.get("used"):
@@ -2497,7 +2514,7 @@ def confirm_password_reset(data: PasswordResetConfirmInput):
     _save_state()
     return {"message":"Password reset successful. You can now log in."}
 
-@app.post("/api/admin/auth/change-password", response_model=AdminUser)
+@app.post("/admin/auth/change-password", response_model=AdminUser)
 def change_own_password(data: ChangePasswordInput, x_apartcare_token: str | None = Header(default=None)):
     user = _current_actor(x_apartcare_token)
     # This endpoint is intentionally available to Viewer/Admin/Supervisor only for changing their own password.
@@ -2514,25 +2531,25 @@ def change_own_password(data: ChangePasswordInput, x_apartcare_token: str | None
     _save_state()
     return user
 
-@app.post("/api/admin/auth/logout")
+@app.post("/admin/auth/logout")
 def admin_logout(x_apartcare_token: str | None = Header(default=None)):
     if x_apartcare_token:
         auth_sessions.pop(x_apartcare_token, None)
         tenant_sessions.pop(x_apartcare_token, None)
     return {"logged_out": True}
 
-@app.get("/api/admin/users", response_model=list[AdminUser])
+@app.get("/admin/users", response_model=list[AdminUser])
 def list_admin_users(x_apartcare_token: str | None = Header(default=None)):
     actor=_require_role(x_apartcare_token, {"Admin"})
     tenant_id=getattr(actor,"tenant_id","")
     rows=list(tenant_users.get(tenant_id, [])) if tenant_id else [u for u in admin_users if not getattr(u,"tenant_id","")]
     return sorted(rows, key=lambda u: (u.role != "Admin", u.username.lower()))
 
-@app.get("/api/admin/session-timeouts", response_model=SessionTimeoutSettings)
+@app.get("/admin/session-timeouts", response_model=SessionTimeoutSettings)
 def get_session_timeouts():
     return session_timeout_settings
 
-@app.put("/api/admin/session-timeouts", response_model=SessionTimeoutSettings)
+@app.put("/admin/session-timeouts", response_model=SessionTimeoutSettings)
 def update_session_timeouts(data: SessionTimeoutSettings, x_apartcare_token: str | None = Header(default=None)):
     actor = _require_role(x_apartcare_token, {"Admin"})
     global session_timeout_settings
@@ -2540,7 +2557,7 @@ def update_session_timeouts(data: SessionTimeoutSettings, x_apartcare_token: str
     _audit(actor.username, "Success", "Session Timeout Updated", user_id=actor.id)
     return session_timeout_settings
 
-@app.post("/api/admin/users", response_model=AdminUser, status_code=201)
+@app.post("/admin/users", response_model=AdminUser, status_code=201)
 def create_admin_user(data: AdminUserInput, background_tasks: BackgroundTasks, x_apartcare_token: str | None = Header(default=None)):
     actor = _require_role(x_apartcare_token, {"Admin"})
     tenant_id=getattr(actor,"tenant_id","")
@@ -2570,7 +2587,7 @@ def create_admin_user(data: AdminUserInput, background_tasks: BackgroundTasks, x
     _save_state()
     return user
 
-@app.put("/api/admin/users/{user_id}", response_model=AdminUser)
+@app.put("/admin/users/{user_id}", response_model=AdminUser)
 def update_admin_user(user_id: str, data: AdminUserUpdate, x_apartcare_token: str | None = Header(default=None)):
     actor = _require_role(x_apartcare_token, {"Admin"})
     tenant_id=getattr(actor,"tenant_id","")
@@ -2597,7 +2614,7 @@ def update_admin_user(user_id: str, data: AdminUserUpdate, x_apartcare_token: st
         _audit(actor.username, "Success", "User Updated", f"Updated {target.username}", actor.id, tenant_id)
     return target
 
-@app.post("/api/admin/users/{user_id}/reset-password", response_model=AdminUser)
+@app.post("/admin/users/{user_id}/reset-password", response_model=AdminUser)
 def reset_admin_password(user_id: str, data: PasswordResetInput, x_apartcare_token: str | None = Header(default=None)):
     actor = _require_role(x_apartcare_token, {"Admin"})
     tenant_id=getattr(actor,"tenant_id","")
@@ -2627,17 +2644,17 @@ def _tenant_history_rows(actor: AdminUser, username: str = "") -> list[LoginAtte
         rows = [h for h in rows if h.username.lower() == key]
     return sorted(rows, key=lambda x: x.at, reverse=True)
 
-@app.get("/api/admin/login-history", response_model=list[LoginAttempt])
+@app.get("/admin/login-history", response_model=list[LoginAttempt])
 def get_login_history(x_apartcare_token: str | None = Header(default=None)):
     actor = _require_role(x_apartcare_token, {"Admin"})
     return _tenant_history_rows(actor)
 
-@app.get("/api/admin/history", response_model=list[LoginAttempt])
+@app.get("/admin/history", response_model=list[LoginAttempt])
 def get_administration_history(username: str = "", x_apartcare_token: str | None = Header(default=None)):
     actor = _require_role(x_apartcare_token, {"Admin"})
     return _tenant_history_rows(actor, username)
 
-@app.get("/api/admin/history/download")
+@app.get("/admin/history/download")
 def download_administration_history(username: str = "", x_apartcare_token: str | None = Header(default=None)):
     actor = _require_role(x_apartcare_token, {"Admin"})
     import csv
@@ -3066,18 +3083,18 @@ def _tenant_actor(token: str | None) -> tuple[AdminUser,TenantAccount]:
         raise HTTPException(status_code=403, detail=f"Property account is {effective_status.lower()}.")
     return user,account
 
-@app.get('/api/subscription')
+@app.get('/subscription')
 def tenant_subscription(x_apartcare_token: str | None = Header(default=None)):
     _, account = _tenant_actor(x_apartcare_token)
     sub = _subscription_for_tenant(account.tenant_id)
     return {"subscription": sub.model_dump() if sub else None, "summary": _subscription_summary(sub)}
 
-@app.get('/api/platform/subscription/settings')
+@app.get('/platform/subscription/settings')
 def platform_subscription_settings(x_auth_token: str | None = Header(default=None)):
     _platform_actor(x_auth_token)
     return subscription_settings
 
-@app.put('/api/platform/subscription/settings')
+@app.put('/platform/subscription/settings')
 def platform_update_subscription_settings(data: SubscriptionSettingsUpdate, x_auth_token: str | None = Header(default=None)):
     actor = _platform_actor(x_auth_token)
     for k, v in data.model_dump(exclude_none=True).items():
@@ -3090,12 +3107,12 @@ def platform_update_subscription_settings(data: SubscriptionSettingsUpdate, x_au
     _save_state()
     return subscription_settings
 
-@app.get('/api/platform/subscription/plans', response_model=list[SubscriptionPlan])
+@app.get('/platform/subscription/plans', response_model=list[SubscriptionPlan])
 def platform_subscription_plans(x_auth_token: str | None = Header(default=None)):
     _platform_actor(x_auth_token)
     return sorted(subscription_plans.values(), key=lambda x:(not x.active, x.monthly_price, x.name.lower()))
 
-@app.post('/api/platform/subscription/plans', response_model=SubscriptionPlan, status_code=201)
+@app.post('/platform/subscription/plans', response_model=SubscriptionPlan, status_code=201)
 def platform_create_subscription_plan(data: SubscriptionPlanInput, x_auth_token: str | None = Header(default=None)):
     actor = _platform_actor(x_auth_token)
     if any(p.code.casefold() == data.code.casefold() for p in subscription_plans.values()):
@@ -3106,7 +3123,7 @@ def platform_create_subscription_plan(data: SubscriptionPlanInput, x_auth_token:
     platform_audit.append({"at":now,"event":"Subscription Plan Created","actor":actor.username,"detail":plan.code})
     _save_state(); return plan
 
-@app.patch('/api/platform/subscription/plans/{plan_id}', response_model=SubscriptionPlan)
+@app.patch('/platform/subscription/plans/{plan_id}', response_model=SubscriptionPlan)
 def platform_update_subscription_plan(plan_id: str, data: SubscriptionPlanUpdate, x_auth_token: str | None = Header(default=None)):
     actor = _platform_actor(x_auth_token); plan = subscription_plans.get(plan_id)
     if not plan: raise HTTPException(status_code=404, detail="Subscription plan not found.")
@@ -3115,7 +3132,7 @@ def platform_update_subscription_plan(plan_id: str, data: SubscriptionPlanUpdate
     platform_audit.append({"at":plan.updated_at,"event":"Subscription Plan Updated","actor":actor.username,"detail":plan.code})
     _save_state(); return plan
 
-@app.get('/api/platform/subscriptions')
+@app.get('/platform/subscriptions')
 def platform_subscriptions(x_auth_token: str | None = Header(default=None)):
     _platform_actor(x_auth_token)
     rows=[]
@@ -3125,7 +3142,7 @@ def platform_subscriptions(x_auth_token: str | None = Header(default=None)):
         rows.append({"subscription":sub.model_dump(),"summary":_subscription_summary(sub),"account":account.model_dump() if account else None})
     return sorted(rows,key=lambda x:(x["summary"].get("status", ""), (x["account"] or {}).get("apartment_name", "").lower()))
 
-@app.get('/api/platform/accounts/{tenant_id}/subscription')
+@app.get('/platform/accounts/{tenant_id}/subscription')
 def platform_account_subscription(tenant_id: str, x_auth_token: str | None = Header(default=None)):
     _platform_actor(x_auth_token)
     account=tenant_accounts.get(tenant_id)
@@ -3133,7 +3150,7 @@ def platform_account_subscription(tenant_id: str, x_auth_token: str | None = Hea
     sub=_subscription_for_tenant(tenant_id)
     return {"account":account.model_dump(),"subscription":sub.model_dump() if sub else None,"summary":_subscription_summary(sub),"history":[h.model_dump() for h in sorted([x for x in subscription_history if x.tenant_id==tenant_id],key=lambda x:x.changed_at,reverse=True)]}
 
-@app.post('/api/platform/accounts/{tenant_id}/subscription/trial-extension')
+@app.post('/platform/accounts/{tenant_id}/subscription/trial-extension')
 def platform_extend_trial(tenant_id: str, data: SubscriptionTrialExtensionInput, x_auth_token: str | None = Header(default=None)):
     actor=_platform_actor(x_auth_token); account=tenant_accounts.get(tenant_id); sub=_subscription_for_tenant(tenant_id)
     if not account: raise HTTPException(status_code=404, detail="Property account not found.")
@@ -3148,7 +3165,7 @@ def platform_extend_trial(tenant_id: str, data: SubscriptionTrialExtensionInput,
     platform_audit.append({"at":sub.updated_at,"event":"Trial Extended","actor":actor.username,"detail":f"{account.account_id}; {data.value} {data.unit}; {data.reason}"})
     _save_state(); return {"subscription":sub,"summary":_subscription_summary(sub)}
 
-@app.post('/api/platform/accounts/{tenant_id}/subscription/complimentary')
+@app.post('/platform/accounts/{tenant_id}/subscription/complimentary')
 def platform_make_complimentary(tenant_id: str, data: ComplimentarySubscriptionInput, x_auth_token: str | None = Header(default=None)):
     actor=_platform_actor(x_auth_token); account=tenant_accounts.get(tenant_id); sub=_subscription_for_tenant(tenant_id)
     if not account: raise HTTPException(status_code=404, detail="Property account not found.")
@@ -3160,7 +3177,7 @@ def platform_make_complimentary(tenant_id: str, data: ComplimentarySubscriptionI
     platform_audit.append({"at":sub.updated_at,"event":"Complimentary Subscription Granted","actor":actor.username,"detail":f"{account.account_id}; valid_to={data.valid_to or 'No expiry'}; {data.reason}"})
     _save_state(); return {"subscription":sub,"summary":_subscription_summary(sub)}
 
-@app.post('/api/platform/accounts/{tenant_id}/subscription/assign-plan/{plan_id}')
+@app.post('/platform/accounts/{tenant_id}/subscription/assign-plan/{plan_id}')
 def platform_assign_plan(tenant_id: str, plan_id: str, x_auth_token: str | None = Header(default=None)):
     actor=_platform_actor(x_auth_token); account=tenant_accounts.get(tenant_id); sub=_subscription_for_tenant(tenant_id); plan=subscription_plans.get(plan_id)
     if not account: raise HTTPException(status_code=404, detail="Property account not found.")
@@ -3170,14 +3187,14 @@ def platform_assign_plan(tenant_id: str, plan_id: str, x_auth_token: str | None 
     _record_subscription_history(sub,actor.username,"Plan Assigned",sub.last_reason,old=old); platform_audit.append({"at":sub.updated_at,"event":"Subscription Plan Assigned","actor":actor.username,"detail":f"{account.account_id}; {plan.name}"}); _save_state()
     return {"subscription":sub,"summary":_subscription_summary(sub)}
 
-@app.post('/api/platform/accounts/{tenant_id}/subscription/cancel')
+@app.post('/platform/accounts/{tenant_id}/subscription/cancel')
 def platform_cancel_subscription(tenant_id: str, reason: str = Body(default="", embed=True), x_auth_token: str | None = Header(default=None)):
     actor=_platform_actor(x_auth_token); sub=_subscription_for_tenant(tenant_id); account=tenant_accounts.get(tenant_id)
     if not account or not sub: raise HTTPException(status_code=404, detail="Subscription not found.")
     old=sub.model_copy(); sub.status="CANCELLED"; sub.last_reason=reason or "Subscription cancelled by Product Owner"; sub.updated_at=datetime.now().isoformat(timespec="seconds")
     _record_subscription_history(sub,actor.username,"Cancelled",sub.last_reason,old=old); platform_audit.append({"at":sub.updated_at,"event":"Subscription Cancelled","actor":actor.username,"detail":f"{account.account_id}; {sub.last_reason}"}); _save_state(); return {"subscription":sub,"summary":_subscription_summary(sub)}
 
-@app.post('/api/subscription/checkout')
+@app.post('/subscription/checkout')
 def subscription_checkout(x_apartcare_token: str | None = Header(default=None)):
     _, account = _tenant_actor(x_apartcare_token); sub=_subscription_for_tenant(account.tenant_id)
     if not sub: raise HTTPException(status_code=404, detail="Subscription not found.")
@@ -3188,7 +3205,7 @@ def subscription_checkout(x_apartcare_token: str | None = Header(default=None)):
     # V6.5.0 deliberately returns a secure integration hand-off rather than inventing a checkout.
     return {"gateway":"Razorpay","mode":"test" if os.getenv("RAZORPAY_KEY_ID","").startswith("rzp_test_") else "live","key_id":os.getenv("RAZORPAY_KEY_ID"),"tenant_id":account.tenant_id,"account_id":account.account_id,"plan":plan.model_dump(),"message":"Razorpay integration is ready for server-side subscription provisioning. Configure test credentials before enabling checkout."}
 
-@app.post('/api/webhooks/razorpay')
+@app.post('/webhooks/razorpay')
 async def razorpay_webhook(request: Request):
     raw=await request.body(); signature=request.headers.get("X-Razorpay-Signature","")
     if not _razorpay_signature_valid(raw,signature): raise HTTPException(status_code=401, detail="Invalid Razorpay webhook signature.")
@@ -3216,11 +3233,11 @@ async def razorpay_webhook(request: Request):
     if event.status=="Processed": _record_subscription_history(sub,"razorpay","Gateway Event",event_type,old=old)
     _save_state(); return {"status":"processed" if event.status=="Processed" else "ignored"}
 
-@app.get('/api/platform/status')
+@app.get('/platform/status')
 def platform_status():
     return {"initialized": platform_owner is not None, "version":"6.5.13", "tenant_count":len(tenant_accounts), "subscription_count":len(subscriptions)}
 
-@app.post('/api/platform/bootstrap')
+@app.post('/platform/bootstrap')
 def platform_bootstrap(data: PlatformBootstrapInput):
     global platform_owner, platform_owner_password, platform_password_policy_initialized
     if platform_owner is not None:
@@ -3235,7 +3252,7 @@ def platform_bootstrap(data: PlatformBootstrapInput):
     _save_state()
     return {"user":platform_owner,"token":token,"display_role":"Product Owner","force_password_change":True,"email_sent":sent,"email_message":msg}
 
-@app.post('/api/platform/login')
+@app.post('/platform/login')
 def platform_login(data: AdminLoginInput):
     if platform_owner is None or data.username.lower()!=platform_owner.username.lower() or _password_hash(data.password)!=platform_owner_password:
         raise HTTPException(status_code=401, detail="Invalid Product Owner credentials.")
@@ -3244,7 +3261,7 @@ def platform_login(data: AdminLoginInput):
     _save_state()
     return {"user":platform_owner,"token":token,"display_role":"Product Owner","force_password_change":bool(platform_owner.force_password_change)}
 
-@app.post('/api/platform/logout')
+@app.post('/platform/logout')
 def platform_logout(x_auth_token: str | None = Header(default=None)):
     """Invalidate only the current Platform Owner token. Platform credentials
     are never persisted in browser storage and the token cannot be reused after logout."""
@@ -3254,7 +3271,7 @@ def platform_logout(x_auth_token: str | None = Header(default=None)):
             platform_audit.append({"at":datetime.now().isoformat(timespec='seconds'),"event":"Product Owner Logout","actor":platform_owner.username,"detail":"Success"})
     return {"logged_out":True}
 
-@app.post('/api/platform/auth/change-password', response_model=AdminUser)
+@app.post('/platform/auth/change-password', response_model=AdminUser)
 def platform_change_own_password(data: ChangePasswordInput, x_auth_token: str | None = Header(default=None)):
     global platform_owner_password, platform_password_policy_initialized
     actor=_platform_actor(x_auth_token)
@@ -3266,7 +3283,7 @@ def platform_change_own_password(data: ChangePasswordInput, x_auth_token: str | 
     _save_state()
     return actor
 
-@app.get('/api/platform/accounts', response_model=list[TenantAccount])
+@app.get('/platform/accounts', response_model=list[TenantAccount])
 def platform_accounts(x_auth_token: str | None = Header(default=None)):
     _platform_actor(x_auth_token)
     today=date.today().isoformat()
@@ -3280,7 +3297,7 @@ def platform_accounts(x_auth_token: str | None = Header(default=None)):
         result.append(TenantAccount(**payload))
     return sorted(result,key=lambda a:a.created_at, reverse=True)
 
-@app.post('/api/platform/accounts/{tenant_id}/support-session')
+@app.post('/platform/accounts/{tenant_id}/support-session')
 def platform_support_session(tenant_id: str, x_auth_token: str | None = Header(default=None)):
     """Start an ephemeral read-only audit/support session for one apartment.
     The Platform Owner does not receive or reuse the apartment Admin password."""
@@ -3298,12 +3315,12 @@ def platform_support_session(tenant_id: str, x_auth_token: str | None = Header(d
     _save_state()
     return {"token":token,"user":support_user,"account":account.model_dump(),"users":[u.model_dump() for u in sorted(tenant_users.get(tenant_id,[]), key=lambda u:(u.role!="Admin",u.username.lower()))],"mode":"Audit/Support (Read Only)"}
 
-@app.post('/api/platform/support-session/logout')
+@app.post('/platform/support-session/logout')
 def platform_support_session_logout(x_auth_token: str | None = Header(default=None)):
     session=platform_support_sessions.pop(x_auth_token or "",None)
     return {"logged_out":True,"tenant_id":session[0] if session else None}
 
-@app.post('/api/platform/accounts', response_model=TenantAccount, status_code=201)
+@app.post('/platform/accounts', response_model=TenantAccount, status_code=201)
 def platform_create_account(data: PlatformTenantCreateInput, x_auth_token: str | None = Header(default=None)):
     _platform_actor(x_auth_token)
     if any(a.apartment_name.lower()==data.apartment_name.strip().lower() and a.city.lower()==data.city.strip().lower() for a in tenant_accounts.values()):
@@ -3335,7 +3352,7 @@ def platform_create_account(data: PlatformTenantCreateInput, x_auth_token: str |
     _save_state()
     return account
 
-@app.patch('/api/platform/accounts/{tenant_id}', response_model=TenantAccount)
+@app.patch('/platform/accounts/{tenant_id}', response_model=TenantAccount)
 def platform_update_account(tenant_id: str, data: TenantStatusUpdate, x_auth_token: str | None = Header(default=None)):
     actor=_platform_actor(x_auth_token); account=tenant_accounts.get(tenant_id)
     if not account: raise HTTPException(status_code=404, detail="Property account not found.")
@@ -3352,7 +3369,7 @@ def platform_update_account(tenant_id: str, data: TenantStatusUpdate, x_auth_tok
         _save_state()
     return account
 
-@app.post('/api/platform/accounts/{tenant_id}/lock', response_model=TenantAccount)
+@app.post('/platform/accounts/{tenant_id}/lock', response_model=TenantAccount)
 def platform_lock_account(tenant_id: str, reason: str = Body(default="", embed=True), x_auth_token: str | None = Header(default=None)):
     actor=_platform_actor(x_auth_token); account=tenant_accounts.get(tenant_id)
     if not account: raise HTTPException(status_code=404, detail="Property account not found.")
@@ -3364,7 +3381,7 @@ def platform_lock_account(tenant_id: str, reason: str = Body(default="", embed=T
     platform_audit.append({"at":datetime.now().isoformat(timespec='seconds'),"event":"Account Locked","actor":actor.username,"detail":f"{account.account_id}; {reason}"})
     _save_state(); return account
 
-@app.post('/api/platform/accounts/{tenant_id}/unlock', response_model=TenantAccount)
+@app.post('/platform/accounts/{tenant_id}/unlock', response_model=TenantAccount)
 def platform_unlock_account(tenant_id: str, reason: str = Body(default="", embed=True), x_auth_token: str | None = Header(default=None)):
     actor=_platform_actor(x_auth_token); account=tenant_accounts.get(tenant_id)
     if not account: raise HTTPException(status_code=404, detail="Property account not found.")
@@ -3378,7 +3395,7 @@ def platform_unlock_account(tenant_id: str, reason: str = Body(default="", embed
     platform_audit.append({"at":datetime.now().isoformat(timespec='seconds'),"event":"Account Unlocked","actor":actor.username,"detail":f"{account.account_id}; {reason}"})
     _save_state(); return account
 
-@app.get('/api/platform/accounts/{tenant_id}/validity-history', response_model=list[TenantAccountValidityHistory])
+@app.get('/platform/accounts/{tenant_id}/validity-history', response_model=list[TenantAccountValidityHistory])
 def platform_account_validity_history(tenant_id: str, x_auth_token: str | None = Header(default=None)):
     _platform_actor(x_auth_token)
     if tenant_id not in tenant_accounts: raise HTTPException(status_code=404, detail="Property account not found.")
@@ -3444,7 +3461,7 @@ def _purge_tenant_data(tenant_id: str) -> dict:
     return counts
 
 
-@app.delete('/api/platform/accounts/{tenant_id}')
+@app.delete('/platform/accounts/{tenant_id}')
 def platform_delete_account(tenant_id: str, x_auth_token: str | None = Header(default=None)):
     # Destructive tenant deletion is intentionally disabled in V6.4.48. Account
     # lifecycle is a time dimension and must be represented by lock/unlock + history.
@@ -3452,7 +3469,7 @@ def platform_delete_account(tenant_id: str, x_auth_token: str | None = Header(de
     if tenant_id not in tenant_accounts: raise HTTPException(status_code=404, detail="Property account not found.")
     raise HTTPException(status_code=410, detail="Permanent Apartment Account deletion is disabled. Use Lock/Unlock and retain the validity history.")
 
-@app.post('/api/tenant/login')
+@app.post('/tenant/login')
 def tenant_login(data: AdminLoginInput, account_id: str):
     account=next((a for a in tenant_accounts.values() if a.account_id.upper()==account_id.upper()),None)
     if not account: raise HTTPException(status_code=401, detail="Invalid Account ID or credentials.")
@@ -3470,7 +3487,7 @@ class PlatformPasswordResetRequest(BaseModel):
     username: str = Field(min_length=1, max_length=120)
     email: str = Field(min_length=5, max_length=120)
 
-@app.post('/api/platform/request-password-reset')
+@app.post('/platform/request-password-reset')
 def platform_request_password_reset(data: PlatformPasswordResetRequest):
     if platform_owner is None: raise HTTPException(status_code=404, detail="Platform Owner is not configured.")
     if data.username.strip().lower()!=platform_owner.username.lower() or data.email.strip().lower()!=platform_owner.email.lower():
@@ -3482,7 +3499,7 @@ def platform_request_password_reset(data: PlatformPasswordResetRequest):
     platform_audit.append({"at":datetime.now().isoformat(timespec='seconds'),"event":"Platform Password Reset Requested","actor":platform_owner.username,"detail":"Reset email sent"})
     _save_state(); return {"message":msg}
 
-@app.post('/api/platform/confirm-password-reset')
+@app.post('/platform/confirm-password-reset')
 def platform_confirm_password_reset(data: PasswordResetConfirmInput):
     global platform_owner_password, platform_password_policy_initialized
     if platform_owner is None: raise HTTPException(status_code=404, detail="Platform Owner is not configured.")
@@ -3493,7 +3510,7 @@ def platform_confirm_password_reset(data: PasswordResetConfirmInput):
     platform_audit.append({"at":datetime.now().isoformat(timespec='seconds'),"event":"Platform Password Reset","actor":platform_owner.username,"detail":"Password reset completed"})
     _save_state(); return {"message":"Platform Owner password reset successfully."}
 
-@app.get('/api/platform/accounts/{tenant_id}/users')
+@app.get('/platform/accounts/{tenant_id}/users')
 def platform_account_users(tenant_id: str, x_auth_token: str | None = Header(default=None)):
     _platform_actor(x_auth_token)
     account=tenant_accounts.get(tenant_id)
@@ -3501,7 +3518,7 @@ def platform_account_users(tenant_id: str, x_auth_token: str | None = Header(def
     users=sorted(tenant_users.get(tenant_id, []), key=lambda u:(u.role!="Admin",u.username.lower()))
     return {"account":account.model_dump(),"users":[u.model_dump() for u in users]}
 
-@app.post('/api/platform/accounts/{tenant_id}/users/{user_id}/unlock', response_model=AdminUser)
+@app.post('/platform/accounts/{tenant_id}/users/{user_id}/unlock', response_model=AdminUser)
 def platform_unlock_property_user(tenant_id: str, user_id: str, x_auth_token: str | None = Header(default=None)):
     actor=_platform_actor(x_auth_token)
     account=tenant_accounts.get(tenant_id)
@@ -3513,7 +3530,7 @@ def platform_unlock_property_user(tenant_id: str, user_id: str, x_auth_token: st
     _audit(actor.username,"Success","Platform Unlock",f"{account.account_id}; unlocked {user.username}",user.id,tenant_id)
     _save_state(); return user
 
-@app.post('/api/platform/accounts/{tenant_id}/users/{user_id}/reset-password', response_model=AdminUser)
+@app.post('/platform/accounts/{tenant_id}/users/{user_id}/reset-password', response_model=AdminUser)
 def platform_reset_property_user_password(tenant_id: str, user_id: str, data: PasswordResetInput, x_auth_token: str | None = Header(default=None)):
     actor=_platform_actor(x_auth_token)
     account=tenant_accounts.get(tenant_id)
@@ -3549,13 +3566,13 @@ def _history_matches(row: dict, q: str = "", account_id: str = "", user_id: str 
         if q.strip().casefold() not in text: return False
     return True
 
-@app.get('/api/platform/login-history')
+@app.get('/platform/login-history')
 def platform_login_history(x_auth_token: str | None = Header(default=None), q: str = "", account_id: str = "", user_id: str = "", event_type: str = "", from_date: str = "", to_date: str = ""):
     _platform_actor(x_auth_token)
     rows=[r for r in _platform_history_rows() if _history_matches(r,q,account_id,user_id,event_type,from_date,to_date)]
     return sorted(rows,key=lambda x:x.get('at',''),reverse=True)
 
-@app.get('/api/platform/login-history/download')
+@app.get('/platform/login-history/download')
 def platform_login_history_download(x_auth_token: str | None = Header(default=None), q: str = "", account_id: str = "", user_id: str = "", event_type: str = "", from_date: str = "", to_date: str = ""):
     _platform_actor(x_auth_token)
     rows=[r for r in _platform_history_rows() if _history_matches(r,q,account_id,user_id,event_type,from_date,to_date)]
@@ -3565,7 +3582,7 @@ def platform_login_history_download(x_auth_token: str | None = Header(default=No
         writer.writerow([r.get('at',''),r.get('account_id',''),r.get('apartment_name',''),r.get('username',''),r.get('event',''),r.get('status',''),r.get('reason','')])
     return StreamingResponse(iter([output.getvalue().encode('utf-8-sig')]),media_type='text/csv; charset=utf-8',headers={'Content-Disposition':'attachment; filename="ApartCare_Global_Login_Audit_History.csv"'})
 
-@app.delete('/api/platform/login-history')
+@app.delete('/platform/login-history')
 def platform_login_history_purge(x_auth_token: str | None = Header(default=None), q: str = "", account_id: str = "", user_id: str = "", event_type: str = "", from_date: str = "", to_date: str = ""):
     actor=_platform_actor(x_auth_token)
     if not any([q.strip(),account_id.strip(),user_id.strip(),event_type.strip(),from_date.strip(),to_date.strip()]):
@@ -3768,14 +3785,17 @@ async def enforce_property_tenant_context(request, call_next):
     # OPTIONS stage with 401, producing the frontend's misleading "Failed to fetch".
     if request.method == "OPTIONS":
         return await call_next(request)
-    if os.getenv("VERCEL") and not DATABASE_URL and request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path != "/api/health":
+    if os.getenv("VERCEL") and not DATABASE_URL and request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path != "/health":
         return JSONResponse(status_code=503, content={"detail": "Production persistence is not configured. Connect a Postgres DATABASE_URL before creating or changing client data."})
     excluded = (
-        "/api/health", "/api/account/", "/api/platform/", "/api/tenant/login",
-        "/api/admin/auth/login", "/api/admin/auth/request-password-reset", "/api/admin/auth/confirm-password-reset",
-        "/api/import/templates", "/api/webhooks/", "/templates/", "/uploads/"
+        "/health", "/account/", "/platform/", "/tenant/login",
+        "/admin/auth/login", "/admin/auth/request-password-reset", "/admin/auth/confirm-password-reset",
+        "/import/templates", "/webhooks/", "/templates/", "/uploads/"
     )
-    if not path.startswith("/api/") or any(path.startswith(prefix) for prefix in excluded):
+    if path.startswith("/templates/") or path.startswith("/uploads/") or any(path.startswith(prefix) for prefix in excluded):
+        return await call_next(request)
+    if path.startswith("/health") or path.startswith("/account/") or path.startswith("/platform/") or path.startswith("/tenant/login") or path.startswith("/admin/auth/") or path.startswith("/import/templates") or path.startswith("/webhooks/"):
+        return await call_next(request)
         return await call_next(request)
 
     token = request.headers.get("x-apartcare-token")
@@ -3803,7 +3823,7 @@ async def enforce_property_tenant_context(request, call_next):
         # Subscription lifecycle is separate from Account validity. Expired/restricted
         # subscriptions can still access login, subscription and billing endpoints,
         # but operational APIs are blocked until payment/reactivation.
-        sub_path_allowed = path.startswith("/api/subscription")
+        sub_path_allowed = path.startswith("/subscription")
         if not sub_path_allowed and not _subscription_access_allowed(tenant):
             return JSONResponse(status_code=402, content={"detail": "ApartCare subscription is restricted. Open Subscription & Billing to restore service."})
         tenant_users_for_account = tenant_users.get(tenant, [])
