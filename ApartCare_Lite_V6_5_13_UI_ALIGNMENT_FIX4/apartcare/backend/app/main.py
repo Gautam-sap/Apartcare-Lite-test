@@ -16,6 +16,7 @@ import hashlib
 import secrets
 import os
 import re
+import tempfile
 import smtplib
 import psycopg
 try:
@@ -43,13 +44,45 @@ async def strip_public_api_prefix(request: Request, call_next):
     return await call_next(request)
 
 
-RUNTIME_DIR = Path(os.getenv('APARTCARE_RUNTIME_DIR', '/tmp/apartcare' if os.getenv('VERCEL') else str(Path(__file__).resolve().parent)))
+# V6.5.13 CORE FUNCTIONALITY FIX 9 — Vercel filesystem boundary.
+#
+# Vercel Services runs Python from /var/task. That directory is READ-ONLY.
+# The previous fixes still allowed the fallback branch to use __file__.parent
+# when Vercel did not expose the expected environment flag, which caused:
+#   OSError: [Errno 30] Read-only file system: '/var/task/app/templates'
+#
+# Detect the deployed filesystem itself as well as the normal Vercel flags.
+# Only /tmp is writable at runtime. Templates are application assets and are
+# never created with mkdir(). If a bundled templates directory exists, it is
+# served read-only from the deployment package.
+_SOURCE_DIR = Path(__file__).resolve().parent
+_IS_DEPLOYED_READONLY = str(_SOURCE_DIR).startswith("/var/task")
+IS_VERCEL = bool(
+    os.getenv("VERCEL")
+    or os.getenv("VERCEL_ENV")
+    or os.getenv("NOW_REGION")
+    or _IS_DEPLOYED_READONLY
+)
+
+if IS_VERCEL:
+    RUNTIME_DIR = Path(tempfile.gettempdir()) / "apartcare"
+    UPLOAD_DIR = RUNTIME_DIR / "uploads"
+    # Templates, when bundled, are read-only application assets.
+    TEMPLATE_DIR = _SOURCE_DIR / "templates"
+else:
+    RUNTIME_DIR = Path(os.getenv("APARTCARE_RUNTIME_DIR", str(_SOURCE_DIR)))
+    UPLOAD_DIR = Path(os.getenv("APARTCARE_UPLOAD_DIR", str(RUNTIME_DIR / "uploads")))
+    TEMPLATE_DIR = Path(os.getenv("APARTCARE_TEMPLATE_DIR", str(RUNTIME_DIR / "templates")))
+
+# Only these directories are runtime-writable. Never mkdir TEMPLATE_DIR.
 RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-UPLOAD_DIR = Path(os.getenv('APARTCARE_UPLOAD_DIR', str(RUNTIME_DIR / 'uploads')))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-TEMPLATE_DIR=Path(__file__).resolve().parent / "templates"
-TEMPLATE_DIR.mkdir(exist_ok=True)
-app.mount("/templates", StaticFiles(directory=str(TEMPLATE_DIR)), name="templates")
+
+# Do not let a missing optional templates folder prevent the whole FastAPI
+# application from importing. The import-template endpoint will report a
+# normal 404 until the corresponding workbook is bundled.
+if TEMPLATE_DIR.is_dir():
+    app.mount("/templates", StaticFiles(directory=str(TEMPLATE_DIR)), name="templates")
 
 
 
