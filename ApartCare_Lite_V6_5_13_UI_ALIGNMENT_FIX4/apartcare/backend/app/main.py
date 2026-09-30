@@ -18,7 +18,13 @@ import os
 import re
 import tempfile
 import smtplib
+import threading
+import contextvars
 import psycopg
+try:
+    from psycopg_pool import ConnectionPool
+except Exception:
+    ConnectionPool = None
 try:
     from vercel.blob import BlobClient, AsyncBlobClient
 except Exception:
@@ -614,10 +620,15 @@ def health():
             "production_ready": False,
         }
     try:
-        conn = _db_connect()
-        if conn is None:
-            raise RuntimeError("DATABASE_URL is not configured")
-        conn.close()
+        pool = _get_db_pool()
+        if pool is not None:
+            with pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                    cur.fetchone()
+        else:
+            conn = psycopg.connect(DATABASE_URL, connect_timeout=3, sslmode='require')
+            conn.close()
         return {
             "status": "ok",
             "version": "6.5.13",
@@ -3296,7 +3307,7 @@ def platform_status():
     return {"initialized": platform_owner is not None, "version":"6.5.13", "tenant_count":len(tenant_accounts), "subscription_count":len(subscriptions)}
 
 @app.post('/platform/bootstrap')
-def platform_bootstrap(data: PlatformBootstrapInput):
+def platform_bootstrap(data: PlatformBootstrapInput, background_tasks: BackgroundTasks):
     global platform_owner, platform_owner_password, platform_password_policy_initialized
     if platform_owner is not None:
         raise HTTPException(status_code=409, detail="Product Owner is already configured.")
@@ -3305,10 +3316,16 @@ def platform_bootstrap(data: PlatformBootstrapInput):
     platform_owner_password=_password_hash(data.password)
     platform_password_policy_initialized=True
     token=secrets.token_urlsafe(32); platform_sessions[token]=platform_owner.id
-    sent,msg=_send_platform_welcome_email(platform_owner.email,platform_owner.full_name,platform_owner.username)
-    platform_audit.append({"at":now,"event":"Platform Initialized","actor":platform_owner.username,"detail":f"Product Owner created; {msg}"})
+    # Never make Platform Owner creation wait for SMTP. Persistence is the core
+    # operation; email delivery is optional and runs after the response is prepared.
+    email_configured=bool(os.getenv('APARTCARE_SMTP_APP_PASSWORD'))
+    email_message=("Platform Owner created. Welcome email queued for delivery." if email_configured
+                   else "Platform Owner created. Email is not configured; set APARTCARE_SMTP_APP_PASSWORD to enable delivery.")
+    if email_configured:
+        background_tasks.add_task(_send_platform_welcome_email, platform_owner.email, platform_owner.full_name, platform_owner.username)
+    platform_audit.append({"at":now,"event":"Platform Initialized","actor":platform_owner.username,"detail":email_message})
     _save_state()
-    return {"user":platform_owner,"token":token,"display_role":"Product Owner","force_password_change":True,"email_sent":sent,"email_message":msg}
+    return {"user":platform_owner,"token":token,"display_role":"Product Owner","force_password_change":True,"email_sent":None,"email_message":email_message}
 
 @app.post('/platform/login')
 def platform_login(data: AdminLoginInput):
@@ -3674,24 +3691,70 @@ def platform_login_history_purge(x_auth_token: str | None = Header(default=None)
 STATE_FILE = Path(os.getenv('APARTCARE_STATE_FILE', str(RUNTIME_DIR / 'apartcare_state.json')))
 DATABASE_URL = os.getenv('DATABASE_URL') or os.getenv('POSTGRES_URL') or os.getenv('POSTGRES_URL_NON_POOLING')
 DB_STATE_TABLE = 'apartcare_state'
+_DB_POOL = None
+_DB_TABLE_READY = False
+_DB_POOL_LOCK = threading.Lock()
+_STATE_SAVED_THIS_REQUEST = contextvars.ContextVar('apartcare_state_saved_this_request', default=False)
+
+def _get_db_pool():
+    global _DB_POOL
+    if not DATABASE_URL:
+        return None
+    if _DB_POOL is not None:
+        return _DB_POOL
+    if ConnectionPool is None:
+        # Safe fallback for environments where psycopg-pool was not packaged.
+        return None
+    with _DB_POOL_LOCK:
+        if _DB_POOL is None:
+            _DB_POOL = ConnectionPool(
+                conninfo=DATABASE_URL,
+                min_size=0,
+                max_size=2,
+                timeout=4,
+                kwargs={'connect_timeout': 3, 'sslmode': 'require'},
+            )
+    return _DB_POOL
 
 def _db_connect():
     if not DATABASE_URL:
         return None
+    pool = _get_db_pool()
+    if pool is not None:
+        return pool.connection()
     return psycopg.connect(DATABASE_URL, connect_timeout=3, sslmode='require')
 
 def _ensure_db_state_table():
-    conn = _db_connect()
-    if conn is None:
+    global _DB_TABLE_READY
+    if _DB_TABLE_READY or not DATABASE_URL:
         return
-    with conn:
+    pool = _get_db_pool()
+    if pool is None:
+        conn = psycopg.connect(DATABASE_URL, connect_timeout=3, sslmode='require')
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(f"CREATE TABLE IF NOT EXISTS {DB_STATE_TABLE} (id SMALLINT PRIMARY KEY, payload JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), version BIGINT NOT NULL DEFAULT 1)")
+            _DB_TABLE_READY = True
+        finally:
+            conn.close()
+        return
+    with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(f"CREATE TABLE IF NOT EXISTS {DB_STATE_TABLE} (id SMALLINT PRIMARY KEY, payload JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), version BIGINT NOT NULL DEFAULT 1)")
-    conn.close()
+        conn.commit()
+    _DB_TABLE_READY = True
 
 def _db_load_state():
     _ensure_db_state_table()
-    conn = _db_connect()
+    pool = _get_db_pool()
+    if pool is not None:
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT payload FROM {DB_STATE_TABLE} WHERE id=1")
+                row = cur.fetchone()
+                return row[0] if row else None
+    conn = psycopg.connect(DATABASE_URL, connect_timeout=3, sslmode='require') if DATABASE_URL else None
     if conn is None:
         return None
     try:
@@ -3705,13 +3768,23 @@ def _db_load_state():
 
 def _db_save_state(data):
     _ensure_db_state_table()
-    conn = _db_connect()
+    pool = _get_db_pool()
+    payload = json.dumps(data, ensure_ascii=False)
+    if pool is not None:
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"INSERT INTO {DB_STATE_TABLE}(id,payload,updated_at,version) VALUES(1,%s,NOW(),1) ON CONFLICT(id) DO UPDATE SET payload=EXCLUDED.payload, updated_at=NOW(), version={DB_STATE_TABLE}.version+1", (payload,))
+            conn.commit()
+        _STATE_SAVED_THIS_REQUEST.set(True)
+        return True
+    conn = psycopg.connect(DATABASE_URL, connect_timeout=3, sslmode='require') if DATABASE_URL else None
     if conn is None:
         return False
     try:
         with conn:
             with conn.cursor() as cur:
-                cur.execute(f"INSERT INTO {DB_STATE_TABLE}(id,payload,updated_at,version) VALUES(1,%s,NOW(),1) ON CONFLICT(id) DO UPDATE SET payload=EXCLUDED.payload, updated_at=NOW(), version={DB_STATE_TABLE}.version+1", (json.dumps(data, ensure_ascii=False),))
+                cur.execute(f"INSERT INTO {DB_STATE_TABLE}(id,payload,updated_at,version) VALUES(1,%s,NOW(),1) ON CONFLICT(id) DO UPDATE SET payload=EXCLUDED.payload, updated_at=NOW(), version={DB_STATE_TABLE}.version+1", (payload,))
+        _STATE_SAVED_THIS_REQUEST.set(True)
         return True
     finally:
         conn.close()
@@ -3962,8 +4035,9 @@ async def load_persistent_state_before_request(request, call_next):
 
 @app.middleware('http')
 async def persist_state_after_mutation(request, call_next):
+    _STATE_SAVED_THIS_REQUEST.set(False)
     response=await call_next(request)
-    if request.method in {'POST','PUT','PATCH','DELETE'} and response.status_code<400:
+    if request.method in {'POST','PUT','PATCH','DELETE'} and response.status_code<400 and not _STATE_SAVED_THIS_REQUEST.get():
         try: _save_state()
         except Exception as e: print('ApartCare state save warning:',e)
     return response

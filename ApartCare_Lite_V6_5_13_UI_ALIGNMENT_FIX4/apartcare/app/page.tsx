@@ -349,10 +349,13 @@ export default function Home(){
   useEffect(()=>{
     (async()=>{
       try{
-        const r=await fetch(`${API}/api/account/status`);
-        const status=r.ok?await r.json():{initialized:false};
+        const [accountResponse,platformResponse]=await Promise.all([
+          fetch(`${API}/api/account/status`),
+          fetch(`${API}/api/platform/status`)
+        ]);
+        const status=accountResponse.ok?await accountResponse.json():{initialized:false};
         setAccountInitialized(!!status.initialized);
-        const ps=await fetch(`${API}/api/platform/status`).then(x=>x.ok?x.json():({initialized:false})).catch(()=>({initialized:false}));
+        const ps=platformResponse.ok?await platformResponse.json():({initialized:false});
         setPlatformInitialized(!!ps.initialized);
         // Remember Account/User is intentionally account-scoped. Do not auto-load a global
         // hint or password before the user identifies the target account.
@@ -648,9 +651,11 @@ export default function Home(){
       setPlatformChangeMessage('');
       if(d.email_message) setPlatformMessage(d.email_message);
       setPlatformProperty(null);
-      await loadPlatformAccounts(d.token);
-      await loadPlatformLoginHistory(d.token);
-      await loadPlatformSubscriptions(d.token);
+      await Promise.all([
+        loadPlatformAccounts(d.token),
+        loadPlatformLoginHistory(d.token),
+        loadPlatformSubscriptions(d.token)
+      ]);
     }catch(err:any){
       setPlatformMessage(`Unable to contact the ApartCare backend. Please confirm the backend is running on ${API}. ${err?.message||''}`.trim());
     }finally{
