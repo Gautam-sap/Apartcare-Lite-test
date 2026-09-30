@@ -16,6 +16,7 @@ import hashlib
 import secrets
 import os
 import re
+import tempfile
 import smtplib
 import psycopg
 try:
@@ -43,13 +44,28 @@ async def strip_public_api_prefix(request: Request, call_next):
     return await call_next(request)
 
 
-RUNTIME_DIR = Path(os.getenv('APARTCARE_RUNTIME_DIR', '/tmp/apartcare' if os.getenv('VERCEL') else str(Path(__file__).resolve().parent)))
+# V6.5.13 CORE FUNCTIONALITY FIX 8 — serverless-safe runtime paths.
+# IMPORTANT: Vercel's deployed bundle (/var/task) is read-only. Do not derive
+# writable runtime directories from __file__ and do not allow deployment
+# environment variables to redirect serverless writes back into /var/task.
+#
+# Vercel normally exposes VERCEL/VERCEL_ENV, but the runtime path itself is
+# deliberately based on tempfile.gettempdir() so this remains safe even if a
+# platform environment flag is missing during function initialization.
+IS_VERCEL = bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("NOW_REGION"))
+if IS_VERCEL:
+    RUNTIME_DIR = Path(tempfile.gettempdir()) / "apartcare"
+    UPLOAD_DIR = RUNTIME_DIR / "uploads"
+    TEMPLATE_DIR = RUNTIME_DIR / "templates"
+else:
+    RUNTIME_DIR = Path(os.getenv("APARTCARE_RUNTIME_DIR", str(Path(__file__).resolve().parent)))
+    UPLOAD_DIR = Path(os.getenv("APARTCARE_UPLOAD_DIR", str(RUNTIME_DIR / "uploads")))
+    TEMPLATE_DIR = Path(os.getenv("APARTCARE_TEMPLATE_DIR", str(RUNTIME_DIR / "templates")))
+
+# These are the only runtime-created directories used by the application.
+# Never mkdir beside this source file when running as a Vercel service.
 RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-UPLOAD_DIR = Path(os.getenv('APARTCARE_UPLOAD_DIR', str(RUNTIME_DIR / 'uploads')))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-# V6.5.13 CORE FUNCTIONALITY FIX 6 — Vercel filesystem safety.
-# /var/task is read-only on Vercel; runtime-created files/directories must live under /tmp.
-TEMPLATE_DIR=Path(os.getenv("APARTCARE_TEMPLATE_DIR", str(RUNTIME_DIR / "templates")))
 TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/templates", StaticFiles(directory=str(TEMPLATE_DIR)), name="templates")
 
