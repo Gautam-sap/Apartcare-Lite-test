@@ -2988,9 +2988,7 @@ input[type="checkbox"]{
         transform:none!important;margin:0!important;padding:0!important;
       }
 
-      `}      
-
-      /* V6.5.13 CORE FUNCTIONALITY FIX 12 — deterministic cloud layout. */
+      /* V6.5.13 CORE FUNCTIONALITY FIX 13 — deterministic cloud layout. */
       .identity-header{
         display:flex!important;flex-direction:row!important;align-items:center!important;justify-content:space-between!important;
         gap:28px!important;flex-wrap:nowrap!important;width:100%!important;box-sizing:border-box!important;
@@ -3030,7 +3028,7 @@ input[type="checkbox"]{
         .identity-header .apartment-brand p{font-size:.72rem!important;line-height:1.2!important}
         .two-donuts{grid-template-columns:1fr!important}
       }
-</style>
+      `}</style>
       <header className="identity-header">
         <section className="apartment-brand">
           {settingsForm.apartment_photo_path?<img src={`${API}${settingsForm.apartment_photo_path}`} alt="Apartment profile" className="identity-photo"/>:<div className="building-icon">🏢</div>}
