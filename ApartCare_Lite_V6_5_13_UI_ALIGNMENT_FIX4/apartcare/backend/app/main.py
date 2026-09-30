@@ -29,6 +29,20 @@ from pydantic import BaseModel, Field, model_validator
 app = FastAPI(title="ApartCare2 API", version="6.5.13")
 
 
+@app.middleware("http")
+async def strip_public_api_prefix(request: Request, call_next):
+    """Vercel Services preserves /api in the rewritten request path.
+
+    The application keeps its existing route definitions (/health, /account/*,
+    /platform/*, etc.). Strip only the public /api prefix before FastAPI route
+    matching so existing business routes remain unchanged.
+    """
+    path = request.scope.get("path", "")
+    if path == "/api" or path.startswith("/api/"):
+        request.scope["path"] = path[4:] or "/"
+    return await call_next(request)
+
+
 RUNTIME_DIR = Path(os.getenv('APARTCARE_RUNTIME_DIR', '/tmp/apartcare' if os.getenv('VERCEL') else str(Path(__file__).resolve().parent)))
 RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR = Path(os.getenv('APARTCARE_UPLOAD_DIR', str(RUNTIME_DIR / 'uploads')))
@@ -558,7 +572,35 @@ def get_month_rows(apartment_id: str, month_key: str) -> list[MaintenanceRow]:
 @app.get("/health")
 def health():
     persistent = bool(DATABASE_URL)
-    return {"status":"ok","version":"6.5.13","storage":"postgres" if persistent else "local","production_ready": persistent and (not os.getenv("VERCEL") or bool(os.getenv("BLOB_READ_WRITE_TOKEN")))}
+    if not persistent:
+        return {
+            "status": "ok",
+            "version": "6.5.13",
+            "storage": "local",
+            "database": "not_configured",
+            "production_ready": False,
+        }
+    try:
+        conn = _db_connect()
+        if conn is None:
+            raise RuntimeError("DATABASE_URL is not configured")
+        conn.close()
+        return {
+            "status": "ok",
+            "version": "6.5.13",
+            "storage": "postgres",
+            "database": "connected",
+            "production_ready": True,
+        }
+    except Exception as exc:
+        return JSONResponse(status_code=503, content={
+            "status": "degraded",
+            "version": "6.5.13",
+            "storage": "postgres",
+            "database": "unavailable",
+            "production_ready": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        })
 
 # ---------- Residents ----------
 def resident_history_for_flat(apartment_id: str, flat_no: str) -> list[FlatHistory]:
@@ -3742,15 +3784,17 @@ def _load_state():
         future_watchman_repairs = _repair_future_watchman_projections()
         if duplicate_payments_removed or future_watchman_repairs or (platform_owner is not None and not platform_password_policy_initialized):
             print(f'ApartCare state repair: removed {duplicate_payments_removed} duplicate payment record(s); soft-deleted {future_watchman_repairs} future Watchman projection(s).')
-        # Re-save after every load so all tenant-scoped records are migrated to
-        # the canonical tenant_id field and legacy apartment_id stays synchronized.
-        _save_state()
+        # IMPORTANT: do not persist during module import on Vercel.
+        # A database write here can make every API invocation fail before the
+        # requested endpoint is reached. Mutating endpoints persist explicitly.
     except Exception as e: print('ApartCare state load warning:',e)
 
 _load_state()
 _default_plan_seed()
 _migrate_legacy_subscriptions()
-_save_state()
+# Local development may persist migrations; Vercel must remain read-only at import.
+if not os.getenv("VERCEL"):
+    _save_state()
 
 @app.middleware("http")
 async def enforce_property_tenant_context(request, call_next):
