@@ -2643,7 +2643,7 @@ def create_admin_user(data: AdminUserInput, background_tasks: BackgroundTasks, x
     if mobile and len([c for c in mobile if c.isdigit()]) < 7:
         raise HTTPException(status_code=422, detail="Enter a valid Mobile Number.")
     now = datetime.now().isoformat(timespec="seconds")
-    user = AdminUser(id=str(uuid4()), username=data.username.strip(), full_name=data.full_name.strip(), email=email, mobile_no=mobile, role=data.role, created_at=now, updated_at=now, force_password_change=True, tenant_id=tenant_id)
+    user = AdminUser(id=str(uuid4()), username=data.username.strip(), full_name=data.full_name.strip(), email=email, mobile_no=mobile, role=data.role, created_at=now, updated_at=now, force_password_change=False, tenant_id=tenant_id)
     admin_users.append(user); admin_passwords[user.id] = _password_hash(data.password)
     if tenant_id:
         tenant_users.setdefault(tenant_id, []).append(user)
@@ -2806,7 +2806,7 @@ class TenantStatusUpdate(BaseModel):
 
 
 class SubscriptionSettings(BaseModel):
-    trial_enabled: bool = True
+    trial_enabled: bool = False
     default_trial_value: int = Field(default=30, ge=1, le=3650)
     default_trial_unit: Literal["Days", "Months"] = "Days"
     default_grace_value: int = Field(default=7, ge=0, le=365)
@@ -3013,11 +3013,12 @@ def _create_subscription_for_tenant(tenant_id: str, created_at: str, actor: str 
         return existing
     created_date = created_at[:10]
     now = datetime.now().isoformat(timespec="seconds")
+    default_plan_id = subscription_settings.default_plan_id or next(iter(subscription_plans), "")
     if subscription_settings.trial_enabled:
         end = _add_period(created_date, subscription_settings.default_trial_value, subscription_settings.default_trial_unit)
-        sub = Subscription(id=str(uuid4()), tenant_id=tenant_id, subscription_type="TRIAL", plan_id="", status="TRIAL", payment_status="NOT_REQUIRED", trial_start_date=created_date, trial_end_date=end, created_at=now, updated_at=now, created_by=actor, last_reason="Trial created from Apartment Account creation date")
+        sub = Subscription(id=str(uuid4()), tenant_id=tenant_id, subscription_type="TRIAL", plan_id=default_plan_id, status="TRIAL", payment_status="NOT_REQUIRED", trial_start_date=created_date, trial_end_date=end, created_at=now, updated_at=now, created_by=actor, last_reason="Trial explicitly enabled by Product Owner policy")
     else:
-        sub = Subscription(id=str(uuid4()), tenant_id=tenant_id, subscription_type="PAID", plan_id=subscription_settings.default_plan_id, status="PAST_DUE", payment_status="PENDING", created_at=now, updated_at=now, created_by=actor, last_reason="Payment required; trial disabled")
+        sub = Subscription(id=str(uuid4()), tenant_id=tenant_id, subscription_type="PAID", plan_id=default_plan_id, status="PAST_DUE", payment_status="PENDING", start_date=created_date, created_at=now, updated_at=now, created_by=actor, last_reason="Default plan assigned from Product Owner subscription policy; payment pending")
     subscriptions[sub.id] = sub
     _record_subscription_history(sub, actor, "Created", sub.last_reason, old=Subscription(id=str(uuid4()), tenant_id=tenant_id, created_at=now, updated_at=now))
     return sub
@@ -3312,7 +3313,7 @@ def platform_bootstrap(data: PlatformBootstrapInput, background_tasks: Backgroun
     if platform_owner is not None:
         raise HTTPException(status_code=409, detail="Product Owner is already configured.")
     now=datetime.now().isoformat(timespec='seconds')
-    platform_owner=AdminUser(id=str(uuid4()),username=data.username.strip(),full_name=data.full_name.strip(),email=data.email.strip().lower(),role="Super Admin",created_at=now,updated_at=now,force_password_change=True)
+    platform_owner=AdminUser(id=str(uuid4()),username=data.username.strip(),full_name=data.full_name.strip(),email=data.email.strip().lower(),role="Super Admin",created_at=now,updated_at=now,force_password_change=False)
     platform_owner_password=_password_hash(data.password)
     platform_password_policy_initialized=True
     token=secrets.token_urlsafe(32); platform_sessions[token]=platform_owner.id
@@ -3325,7 +3326,7 @@ def platform_bootstrap(data: PlatformBootstrapInput, background_tasks: Backgroun
         background_tasks.add_task(_send_platform_welcome_email, platform_owner.email, platform_owner.full_name, platform_owner.username)
     platform_audit.append({"at":now,"event":"Platform Initialized","actor":platform_owner.username,"detail":email_message})
     _save_state()
-    return {"user":platform_owner,"token":token,"display_role":"Product Owner","force_password_change":True,"email_sent":None,"email_message":email_message}
+    return {"user":platform_owner,"token":token,"display_role":"Product Owner","force_password_change":False,"email_sent":None,"email_message":email_message}
 
 @app.post('/platform/login')
 def platform_login(data: AdminLoginInput):
@@ -3417,7 +3418,7 @@ def platform_create_account(data: PlatformTenantCreateInput, x_auth_token: str |
     _record_account_validity_history(account, "Created", platform_owner.username if platform_owner else "system", "Apartment account created by Platform Owner")
     # Universal password policy: every newly created property user starts with
     # a temporary password and must change it on first login.
-    admin=AdminUser(id=str(uuid4()),username=data.admin_username.strip(),full_name=data.admin_name.strip(),email=admin_email,mobile_no=admin_mobile,role="Admin",created_at=now,updated_at=now,tenant_id=tid,force_password_change=True)
+    admin=AdminUser(id=str(uuid4()),username=data.admin_username.strip(),full_name=data.admin_name.strip(),email=admin_email,mobile_no=admin_mobile,role="Admin",created_at=now,updated_at=now,tenant_id=tid,force_password_change=False)
     tenant_users[tid]=[admin]; tenant_passwords[admin.id]=_password_hash(data.password)
     _create_subscription_for_tenant(tid, now, platform_owner.username if platform_owner else "system")
     # Seed the standard utility directory inside the new tenant namespace.
@@ -3694,6 +3695,7 @@ DB_STATE_TABLE = 'apartcare_state'
 _DB_POOL = None
 _DB_TABLE_READY = False
 _DB_POOL_LOCK = threading.Lock()
+_LOCAL_DB_VERSION = 0
 _STATE_SAVED_THIS_REQUEST = contextvars.ContextVar('apartcare_state_saved_this_request', default=False)
 
 def _get_db_pool():
@@ -3746,13 +3748,15 @@ def _ensure_db_state_table():
     _DB_TABLE_READY = True
 
 def _db_load_state():
+    global _LOCAL_DB_VERSION
     _ensure_db_state_table()
     pool = _get_db_pool()
     if pool is not None:
         with pool.connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(f"SELECT payload FROM {DB_STATE_TABLE} WHERE id=1")
+                cur.execute(f"SELECT payload, version FROM {DB_STATE_TABLE} WHERE id=1")
                 row = cur.fetchone()
+                _LOCAL_DB_VERSION = int(row[1] or 0) if row else 0
                 return row[0] if row else None
     conn = psycopg.connect(DATABASE_URL, connect_timeout=3, sslmode='require') if DATABASE_URL else None
     if conn is None:
@@ -3760,21 +3764,55 @@ def _db_load_state():
     try:
         with conn:
             with conn.cursor() as cur:
-                cur.execute(f"SELECT payload FROM {DB_STATE_TABLE} WHERE id=1")
+                cur.execute(f"SELECT payload, version FROM {DB_STATE_TABLE} WHERE id=1")
                 row = cur.fetchone()
+                _LOCAL_DB_VERSION = int(row[1] or 0) if row else 0
                 return row[0] if row else None
     finally:
         conn.close()
 
-def _db_save_state(data):
+def _db_state_version():
+    if not DATABASE_URL:
+        return 0
     _ensure_db_state_table()
     pool = _get_db_pool()
-    payload = json.dumps(data, ensure_ascii=False)
     if pool is not None:
         with pool.connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(f"INSERT INTO {DB_STATE_TABLE}(id,payload,updated_at,version) VALUES(1,%s,NOW(),1) ON CONFLICT(id) DO UPDATE SET payload=EXCLUDED.payload, updated_at=NOW(), version={DB_STATE_TABLE}.version+1", (payload,))
+                cur.execute(f"SELECT version FROM {DB_STATE_TABLE} WHERE id=1")
+                row = cur.fetchone()
+                return int(row[0] or 0) if row else 0
+    conn = psycopg.connect(DATABASE_URL, connect_timeout=3, sslmode='require')
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT version FROM {DB_STATE_TABLE} WHERE id=1")
+                row = cur.fetchone()
+                return int(row[0] or 0) if row else 0
+    finally:
+        conn.close()
+
+def _refresh_state_if_changed():
+    global _LOCAL_DB_VERSION
+    if not DATABASE_URL:
+        return
+    current_version = _db_state_version()
+    if current_version != _LOCAL_DB_VERSION:
+        _load_state()
+
+def _db_save_state(data):
+    global _LOCAL_DB_VERSION
+    _ensure_db_state_table()
+    pool = _get_db_pool()
+    payload = json.dumps(data, ensure_ascii=False)
+    sql = f"INSERT INTO {DB_STATE_TABLE}(id,payload,updated_at,version) VALUES(1,%s,NOW(),1) ON CONFLICT(id) DO UPDATE SET payload=EXCLUDED.payload, updated_at=NOW(), version={DB_STATE_TABLE}.version+1 RETURNING version"
+    if pool is not None:
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (payload,))
+                row = cur.fetchone()
             conn.commit()
+        _LOCAL_DB_VERSION = int(row[0] or 0) if row else _LOCAL_DB_VERSION
         _STATE_SAVED_THIS_REQUEST.set(True)
         return True
     conn = psycopg.connect(DATABASE_URL, connect_timeout=3, sslmode='require') if DATABASE_URL else None
@@ -3783,7 +3821,9 @@ def _db_save_state(data):
     try:
         with conn:
             with conn.cursor() as cur:
-                cur.execute(f"INSERT INTO {DB_STATE_TABLE}(id,payload,updated_at,version) VALUES(1,%s,NOW(),1) ON CONFLICT(id) DO UPDATE SET payload=EXCLUDED.payload, updated_at=NOW(), version={DB_STATE_TABLE}.version+1", (payload,))
+                cur.execute(sql, (payload,))
+                row = cur.fetchone()
+        _LOCAL_DB_VERSION = int(row[0] or 0) if row else _LOCAL_DB_VERSION
         _STATE_SAVED_THIS_REQUEST.set(True)
         return True
     finally:
@@ -3855,12 +3895,16 @@ def _load_state():
         po=d.get('platform_owner'); platform_owner=AdminUser(**po) if po else None; platform_owner_password=d.get('platform_owner_password','')
         policy_present='platform_password_policy_initialized' in d
         platform_password_policy_initialized=bool(d.get('platform_password_policy_initialized',False))
-        # One-time migration for versions that predate the Platform Owner first-login password policy.
-        # Existing Platform Owners are required to change the old password once; after that the
-        # policy marker is persisted and subsequent logins do not prompt again.
-        if platform_owner and not policy_present:
-            platform_owner.force_password_change=True
-            platform_password_policy_initialized=False
+        # FIX 11: normal account creation/login does not force a password change.
+        # Clear only the Fix-10 initial-password flag (created_at == updated_at).
+        # Explicit password resets update updated_at and therefore remain forced.
+        if platform_owner and platform_owner.force_password_change and platform_owner.created_at == platform_owner.updated_at:
+            platform_owner.force_password_change=False
+            platform_password_policy_initialized=True
+        for _tid, _users in tenant_users.items():
+            for _u in _users:
+                if _u.force_password_change and _u.created_at == _u.updated_at:
+                    _u.force_password_change=False
         tenant_accounts={k:TenantAccount(**v) for k,v in d.get('tenant_accounts',{}).items()}
         # Backfill the new per-tenant operational start month without altering
         # historical transactional data or tenant identifiers.
@@ -3868,7 +3912,12 @@ def _load_state():
             locked_month=_effective_operational_start_month(_account.tenant_id)
             _account.data_start_month=locked_month
         tenant_account_validity_history=[TenantAccountValidityHistory(**x) for x in d.get('tenant_account_validity_history',[])]; tenant_users={k:[AdminUser(**u) for u in v] for k,v in d.get('tenant_users',{}).items()}; tenant_passwords=d.get('tenant_passwords',{}); platform_audit=d.get('platform_audit',[]); auth_sessions=dict(d.get('auth_sessions',{}))
-        subscription_settings=SubscriptionSettings(**d.get('subscription_settings',{})); subscription_plans={k:SubscriptionPlan(**v) for k,v in d.get('subscription_plans',{}).items()}; subscriptions={k:Subscription(**v) for k,v in d.get('subscriptions',{}).items()}; subscription_history=[SubscriptionHistory(**x) for x in d.get('subscription_history',[])]; subscription_events=[SubscriptionEvent(**x) for x in d.get('subscription_events',[])]; subscription_payments=[SubscriptionPayment(**x) for x in d.get('subscription_payments',[])]
+        subscription_settings=SubscriptionSettings(**d.get('subscription_settings',{}));
+        # A legacy Fix-10 state may have trial_enabled=True with updated_by=system.
+        # Treat that as the old implicit default, not an explicit Product Owner choice.
+        if subscription_settings.updated_by in ('','system') and not subscription_settings.updated_at:
+            subscription_settings.trial_enabled=False
+        subscription_plans={k:SubscriptionPlan(**v) for k,v in d.get('subscription_plans',{}).items()}; subscriptions={k:Subscription(**v) for k,v in d.get('subscriptions',{}).items()}; subscription_history=[SubscriptionHistory(**x) for x in d.get('subscription_history',[])]; subscription_events=[SubscriptionEvent(**x) for x in d.get('subscription_events',[])]; subscription_payments=[SubscriptionPayment(**x) for x in d.get('subscription_payments',[])]
         _default_plan_seed()
         _migrate_legacy_subscriptions()
         # Correct the legacy Telangana account code typo (TE -> TS) without
@@ -4022,15 +4071,15 @@ async def enforce_property_tenant_context(request, call_next):
 
 @app.middleware('http')
 async def load_persistent_state_before_request(request, call_next):
-    # In production, Vercel instances are ephemeral. Reload the authoritative
-    # application state from Postgres before each request so a warm function
-    # cannot retain another tenant's state between requests. Local development
-    # continues to use the JSON state file when DATABASE_URL is absent.
+    # FIX 11: do not reload the entire JSONB state blob on every request.
+    # Perform a lightweight version check and reload only when another Vercel
+    # instance has committed a newer state version. This keeps cloud latency
+    # low while preserving cross-instance tenant/account consistency.
     if DATABASE_URL:
         try:
-            _load_state()
+            _refresh_state_if_changed()
         except Exception as e:
-            print('ApartCare persistent state load warning:', e)
+            print('ApartCare persistent state refresh warning:', e)
     return await call_next(request)
 
 @app.middleware('http')
