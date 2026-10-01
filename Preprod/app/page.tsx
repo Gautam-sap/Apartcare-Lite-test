@@ -542,7 +542,8 @@ export default function Home(){
     setPlatformAccounts(accounts);
     if(accounts.length && !platformRecoveryTenantId){
       setPlatformRecoveryTenantId(accounts[0].tenant_id);
-      await loadPlatformRecoveryProperty(token,accounts[0].tenant_id);
+      // Do not block the Platform Owner console on the secondary user-list request.
+      void loadPlatformRecoveryProperty(token,accounts[0].tenant_id);
     }
   };
   const platformAuditQuery=()=>{const q=new URLSearchParams();if(platformAuditSearch.trim())q.set('q',platformAuditSearch.trim());if(platformAuditAccount.trim())q.set('account_id',platformAuditAccount.trim());if(platformAuditUser.trim())q.set('user_id',platformAuditUser.trim());if(platformAuditEvent)q.set('event_type',platformAuditEvent);if(platformAuditFrom)q.set('from_date',platformAuditFrom);if(platformAuditTo)q.set('to_date',platformAuditTo);return q.toString();};
@@ -651,7 +652,10 @@ export default function Home(){
       setPlatformChangeMessage('');
       if(d.email_message) setPlatformMessage(d.email_message);
       setPlatformProperty(null);
-      await Promise.all([
+      // Show the Platform Owner console immediately after authentication.
+      // Account/audit/subscription data can hydrate in parallel without making
+      // the login response wait for every secondary API request/cold start.
+      void Promise.all([
         loadPlatformAccounts(d.token),
         loadPlatformLoginHistory(d.token),
         loadPlatformSubscriptions(d.token)
@@ -1658,7 +1662,13 @@ export default function Home(){
       html,body{width:100%!important;max-width:100%!important;margin:0!important;padding:0!important;overflow-x:hidden!important}
       .platform-owner-auth-shell{width:100%!important;max-width:100%!important;box-sizing:border-box!important;overflow-x:hidden!important}
       .platform-owner-auth-shell .auth-card,.platform-owner-auth-shell .platform-owner-console{box-sizing:border-box!important;width:100%!important;max-width:1040px!important;min-width:0!important}
-      .platform-owner-auth-shell .auth-brand{min-width:0!important;width:100%!important;box-sizing:border-box!important}
+      .platform-owner-auth-shell .auth-brand{display:flex!important;flex-direction:row!important;align-items:center!important;justify-content:flex-start!important;gap:20px!important;width:100%!important;min-width:0!important;box-sizing:border-box!important;padding:0 0 22px!important;margin:0 0 22px!important;border-bottom:1px solid #dbe4ef!important}
+      .platform-owner-auth-shell .auth-logo{width:108px!important;height:76px!important;display:flex!important;align-items:center!important;justify-content:center!important;flex:0 0 108px!important;border-radius:14px!important;background:#fff!important;border:1px solid #dbe4ef!important;overflow:hidden!important;box-shadow:0 6px 18px rgba(23,43,77,.08)!important;padding:4px!important}
+      .platform-owner-auth-shell .auth-logo img{display:block!important;width:100%!important;height:100%!important;max-width:100%!important;max-height:100%!important;object-fit:contain!important}
+      .platform-owner-auth-shell .auth-brand-copy{min-width:0!important;display:flex!important;flex-direction:column!important;gap:3px!important}
+      .platform-owner-auth-shell .auth-brand-copy h1{margin:0 0 3px!important;font-size:32px!important;line-height:1.1!important;color:#172b4d!important;font-weight:850!important;letter-spacing:-.03em!important}
+      .platform-owner-auth-shell .auth-brand-copy p{margin:0!important;font-size:16px!important;color:#315f96!important;font-weight:750!important}
+      .platform-owner-auth-shell .auth-brand-copy em{margin:0!important;font-style:normal!important;color:#0f8a5f!important;font-weight:650!important}
       .platform-owner-auth-shell .auth-brand>div:last-child{min-width:0!important}
       .platform-owner-auth-shell .auth-brand h1,.platform-owner-auth-shell .auth-brand p,.platform-owner-auth-shell .auth-brand em{overflow-wrap:anywhere!important}
       .platform-owner-auth-shell .auth-form{box-sizing:border-box!important;width:100%!important;min-width:0!important}
@@ -2230,7 +2240,7 @@ button{cursor:pointer}
       @media(max-width:900px){.platform-owner-auth-shell .platform-recovery-toolbar{grid-template-columns:1fr 1fr!important}.platform-owner-auth-shell .platform-recovery-toolbar button{grid-column:1/-1!important;width:max-content!important}.platform-owner-auth-shell .platform-recovery-summary{grid-template-columns:repeat(2,minmax(0,1fr))!important}}
       @media(max-width:600px){.platform-owner-auth-shell .platform-recovery-panel{padding:16px!important}.platform-owner-auth-shell .recovery-page-hero{align-items:flex-start!important;flex-wrap:wrap!important}.platform-owner-auth-shell .platform-recovery-toolbar{grid-template-columns:1fr!important}.platform-owner-auth-shell .platform-recovery-toolbar button{grid-column:auto!important;width:100%!important}.platform-owner-auth-shell .platform-recovery-summary{grid-template-columns:1fr!important}.platform-owner-auth-shell .platform-recovery-user-toolbar{grid-template-columns:1fr!important}}
 `}</style>
-        <div className="auth-brand"><div className="auth-logo">🛡️</div><div><h1>ApartCare Lite Platform</h1><p>Product Owner Administration</p><em>Tenant recovery, account oversight and controlled security actions.</em></div></div>
+        <div className="auth-brand"><div className="auth-logo"><img src="/apartcare-lite-logo.png" alt="ApartCare Lite"/></div><div className="auth-brand-copy"><h1>ApartCare Lite Platform</h1><p>Product Owner Administration</p><em>Tenant recovery, account oversight and controlled security actions.</em></div></div>
         {platformUser?<>
       {platformMustChangePassword&&<div className="modal-backdrop"><section className="password-modal password-modal-branded"><div className="password-modal-brand"><img className="po-brand-image" src="/apartcare-lite-logo.png" alt="ApartCare Lite"/><div className="password-modal-brand-copy"><strong>ApartCare Lite</strong><span>Your daily partner in property care.</span><em>Helping you run your building beautifully.</em></div></div><div className="modal-icon">🔐</div><h2>Change your Platform Owner password</h2><p>For security, the Platform Owner must set a new password before continuing. This requirement remains active until the password is changed.</p>{platformChangeMessage&&<div className="message">{platformChangeMessage}</div>}<form onSubmit={changePlatformPassword}><label>New Password<div className="password-field"><input required minLength={8} type={showPassword?'text':'password'} value={platformChangeForm.new_password} onChange={e=>setPlatformChangeForm({...platformChangeForm,new_password:e.target.value})}/><button type="button" className="password-toggle" onClick={()=>setShowPassword(!showPassword)}>{showPassword?'🙈':'👁️'}</button></div></label><label>Confirm New Password<div className="password-field"><input required minLength={8} type={showConfirmPassword?'text':'password'} value={platformChangeForm.confirm_password} onChange={e=>setPlatformChangeForm({...platformChangeForm,confirm_password:e.target.value})}/><button type="button" className="password-toggle" onClick={()=>setShowConfirmPassword(!showConfirmPassword)}>{showConfirmPassword?'🙈':'👁️'}</button></div></label><div className="form-actions"><button type="submit" className="auth-primary-button" disabled={platformBusy}>{platformBusy?'Updating Password…':'Update Password & Continue'}</button></div></form></section></div>}
           <header className="po-top-header">
@@ -2321,7 +2331,7 @@ button{cursor:pointer}
                 </label>
                 <button type="button" className="secondary" onClick={()=>setPlatformRecoveryUserSearch('')}>Clear Search</button>
               </div>
-              <div className="table-scroll business-grid"><table><thead><tr><th>User ID</th><th>Name</th><th>Role</th><th>Email</th><th>Mobile</th><th>Status</th><th>Lock</th><th>Actions</th></tr></thead><tbody>{(()=>{const q=platformRecoveryUserSearch.trim().toLowerCase();const users=(platformRecoveryProperty.users||[]).filter((u:any)=>!q||[u.username,u.full_name,u.role,u.email,u.mobile_no,u.active?'Active':'Inactive',u.locked?'Locked':'Open'].some((v:any)=>String(v||'').toLowerCase().includes(q)));return users.length===0?<tr><td colSpan={8} className="empty">{q?'No matching tenant users found.':'No users available for this apartment.'}</td></tr>:users.map((u:any)=><tr key={u.id}><td><b>{u.username}</b>{platformRecoveryProperty.tenant_id==='ALL'&&<small>{u._account_id||'—'}</small>}</td><td>{u.full_name}{platformRecoveryProperty.tenant_id==='ALL'&&<small>{u._apartment_name||'—'}</small>}</td><td>{u.role}</td><td>{u.email||'—'}</td><td>{u.mobile_no||'—'}</td><td>{u.active?'Active':'Inactive'}</td><td>{u.locked?'Locked':'Open'}</td><td><button type="button" className="secondary" onClick={()=>platformResetUser(u.id,platformRecoveryProperty.tenant_id==='ALL'?u._tenant_id:platformRecoveryProperty.tenant_id)}>Reset Password</button>{u.locked&&<button type="button" className="secondary" onClick={()=>platformUnlock(u.id,platformRecoveryProperty.tenant_id==='ALL'?u._tenant_id:platformRecoveryProperty.tenant_id)}>Unlock / Activate</button>}</td></tr>)})()}</tbody></table></div>
+              <div className="table-scroll business-grid"><table><thead><tr><th>User ID</th><th>Name</th><th>Apartment</th><th>Role</th><th>Email</th><th>Mobile</th><th>Status</th><th>Last Activity</th><th>History</th><th>Actions</th></tr></thead><tbody>{(()=>{const q=platformRecoveryUserSearch.trim().toLowerCase();const users=(platformRecoveryProperty.users||[]).filter((u:any)=>!q||[u.username,u.full_name,u.role,u.email,u.mobile_no,u.active?'Active':'Inactive',u.locked?'Locked':'Open'].some((v:any)=>String(v||'').toLowerCase().includes(q)));return users.length===0?<tr><td colSpan={10} className="empty">{q?'No matching tenant users found.':'No users available for this apartment.'}</td></tr>:users.map((u:any)=><tr key={u.id}>{(()=>{const tid=platformRecoveryProperty.tenant_id==='ALL'?u._tenant_id:platformRecoveryProperty.tenant_id;const hist=(platformLoginHistory||[]).filter((h:any)=>String(h.username||'').toLowerCase()===String(u.username||'').toLowerCase() && (!tid || !h.tenant_id || h.tenant_id===tid));const last=hist[0];return <><td><b>{u.username}</b></td><td>{u.full_name}</td><td>{platformRecoveryProperty.tenant_id==='ALL'?(u._apartment_name||'—'):(platformRecoveryProperty.apartment_name||'—')}</td><td>{u.role}</td><td>{u.email||'—'}</td><td>{u.mobile_no||'—'}</td><td>{u.active?'Active':'Inactive'}{u.locked&&<small>Locked</small>}</td><td>{last?formatDateTime(last.at):'No history'}</td><td><b>{hist.length}</b> event{hist.length===1?'':'s'}</td><td><button type="button" className="secondary" onClick={()=>platformResetUser(u.id,tid)}>Reset Password</button>{u.locked&&<button type="button" className="secondary" onClick={()=>platformUnlock(u.id,tid)}>Unlock / Activate</button>}</td></>})()}</tr>)})()}</tbody></table></div>
             </>:<div className="empty">Select an Apartment Account above. The selected tenant's Admins and users will be shown here for controlled password recovery.</div>}
           </section>}
           <div className="form-actions platform-logout-row"><button type="button" className="auth-secondary-button" onClick={platformLogout}>🔒 Logout Platform Owner</button></div>
@@ -2988,6 +2998,17 @@ input[type="checkbox"]{
         transform:none!important;margin:0!important;padding:0!important;
       }
 
+      /* V6.5.13 CORE FUNCTIONALITY FIX 14 — cloud layout hardening.
+         Keep module identity/title/action areas horizontal on desktop. Forms and
+         dense data-entry fields remain intentionally vertical for usability. */
+      .page-title-row,.section-title-row{display:flex!important;align-items:center!important;justify-content:space-between!important;gap:18px!important;width:100%!important;box-sizing:border-box!important}
+      .page-title-row>div:first-child,.section-title-row>div:first-child{min-width:0!important;flex:1 1 auto!important}
+      .page-title-row>button,.page-title-row>label,.section-title-row>button,.section-title-row>.audit-count-badge{flex:0 0 auto!important}
+      .page-title-row h1,.page-title-row h2,.page-title-row p,.section-title-row h2,.section-title-row h3,.section-title-row p{margin-top:0!important}
+      .module-header,.module-brand-row,.module-identity-row{display:flex!important;align-items:center!important;justify-content:space-between!important;gap:18px!important;flex-wrap:nowrap!important;width:100%!important}
+      .module-header>*:first-child,.module-brand-row>*:first-child,.module-identity-row>*:first-child{min-width:0!important;flex:1 1 auto!important}
+      .module-header>*:last-child,.module-brand-row>*:last-child,.module-identity-row>*:last-child{flex:0 0 auto!important}
+
       /* V6.5.13 CORE FUNCTIONALITY FIX 13 — deterministic cloud layout. */
       .identity-header{
         display:flex!important;flex-direction:row!important;align-items:center!important;justify-content:space-between!important;
@@ -3018,6 +3039,11 @@ input[type="checkbox"]{
         .two-donuts{grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:14px!important}
       }
       @media(max-width:680px){
+        .platform-owner-auth-shell .auth-brand{align-items:flex-start!important;gap:12px!important}
+        .platform-owner-auth-shell .auth-logo{width:82px!important;height:60px!important;flex-basis:82px!important}
+        .platform-owner-auth-shell .auth-brand-copy h1{font-size:24px!important}
+        .page-title-row,.section-title-row{align-items:flex-start!important;flex-direction:column!important;gap:10px!important}
+        .page-title-row>button,.page-title-row>label,.section-title-row>button,.section-title-row>.audit-count-badge{align-self:flex-start!important}
         .identity-header{gap:10px!important;padding:12px 14px!important}
         .identity-header .apartment-brand{gap:9px!important}
         .identity-header .app-brand{min-width:245px!important;gap:8px!important}
