@@ -34,7 +34,7 @@ except Exception:
 from email.message import EmailMessage
 from pydantic import BaseModel, Field, model_validator
 
-app = FastAPI(title="ApartCare2 API", version="6.5.13-CLEAN-UI-BUILD-2")
+app = FastAPI(title="ApartCare2 API", version="6.5.13-CLEAN-UI-BUILD-4")
 
 
 @app.middleware("http")
@@ -1305,8 +1305,15 @@ def lock_expense(expense_id: str, locked: bool=True, reason: str="", x_apartcare
 
 # ---------- Settings / Operational Defaults ----------
 @app.get("/settings/charges", response_model=ChargeSettings)
-def get_charge_settings(apartment_id: str = "demo-apartment"):
-    return charge_settings.get(apartment_id, ChargeSettings(apartment_id=apartment_id))
+def get_charge_settings(apartment_id: str = "demo-apartment", tenant_id: str = "", x_apartcare_token: str | None = Header(default=None)):
+    requested = str(tenant_id or apartment_id or "demo-apartment")
+    if x_apartcare_token:
+        actor=_current_actor(x_apartcare_token)
+        canonical=_actor_apartment_id(actor)
+        if requested not in {canonical, "", "demo-apartment"}:
+            raise HTTPException(status_code=403, detail="Tenant context mismatch.")
+        requested=canonical
+    return charge_settings.get(requested, ChargeSettings(apartment_id=requested, tenant_id=requested))
 
 @app.get("/settings/charges/effective")
 def get_effective_charge_settings(month_key: str, apartment_id: str = "demo-apartment"):
@@ -2471,6 +2478,7 @@ def admin_login(data: AdminLoginInput, account_id: str = ""):
         if tenant_passwords.get(user.id)!=_password_hash(data.password):
             failed_login_counts[failed_key]=failed_login_counts.get(failed_key,0)+1
             _audit(user.username,"Failed","Login",f"Invalid password; Tenant {tenant_account.account_id}",user.id,tenant_account.tenant_id)
+            _save_state()
             if failed_login_counts[failed_key] >= 5:
                 user.locked=True; user.updated_at=datetime.now().isoformat(timespec="seconds")
                 _audit(user.username,"Blocked","Account Locked",f"Five consecutive failed login attempts; Tenant {tenant_account.account_id}",user.id,tenant_account.tenant_id)
@@ -2479,6 +2487,7 @@ def admin_login(data: AdminLoginInput, account_id: str = ""):
         failed_login_counts.pop(failed_key,None)
         token=secrets.token_urlsafe(32); auth_sessions[token]=user.id; tenant_sessions[token]=(tenant_account.tenant_id,user.id)
         _audit(user.username,"Success","Login",f"Tenant {tenant_account.account_id}",user.id,tenant_account.tenant_id)
+        _save_state()
         return {"user":user,"token":token,"account":_account_payload(tenant_account)}
     settings=charge_settings.get("demo-apartment", ChargeSettings())
     expected=getattr(settings,"account_id", "")
@@ -2506,6 +2515,7 @@ def admin_login(data: AdminLoginInput, account_id: str = ""):
     if admin_passwords.get(user.id) != _password_hash(data.password):
         key=user.username.lower(); failed_login_counts[key]=failed_login_counts.get(key,0)+1
         _audit(user.username, "Failed", "Login", "Invalid password", user.id)
+        _save_state()
         if failed_login_counts[key] >= 5:
             user.locked=True; user.updated_at=datetime.now().isoformat(timespec="seconds")
             _audit(user.username, "Blocked", "Account Locked", "Five consecutive failed login attempts", user.id)
@@ -2518,6 +2528,7 @@ def admin_login(data: AdminLoginInput, account_id: str = ""):
         user.force_password_change=False
     token = secrets.token_urlsafe(32); auth_sessions[token] = user.id
     _audit(user.username, "Success", "Login", user_id=user.id)
+    _save_state()
     return AuthLoginResponse(user=user, token=token, account={"tenant_id":"demo-apartment","account_id":getattr(settings,"account_id",""),"apartment_name":settings.apartment_name})
 
 @app.post("/admin/auth/request-password-reset")
