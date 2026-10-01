@@ -33,7 +33,7 @@ except Exception:
 from email.message import EmailMessage
 from pydantic import BaseModel, Field, model_validator
 
-app = FastAPI(title="ApartCare2 API", version="6.5.13")
+app = FastAPI(title="ApartCare2 API", version="6.5.13-CLEAN-UI-BUILD-1")
 
 
 @app.middleware("http")

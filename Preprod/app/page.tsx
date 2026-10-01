@@ -2372,7 +2372,27 @@ button{cursor:pointer}
         .auth-card .remember-login>span{line-height:1.35!important}
         .auth-primary-button{background:linear-gradient(135deg,#2563eb,#0f9f9a)!important;color:#fff!important;border:0!important;border-radius:11px!important;min-height:44px!important;padding:10px 18px!important;font-weight:800!important;box-shadow:0 8px 18px rgba(37,99,235,.22)!important}.auth-secondary-button,.auth-back-button{background:#fff!important;color:#315f96!important;border:1px solid #c8d5e5!important;border-radius:10px!important;min-height:40px!important;padding:8px 14px!important;font-weight:750!important}.account-id-preview{padding:13px 15px!important;border:1px solid #bfdbfe!important;border-radius:12px!important;background:#eff6ff!important;color:#1d4ed8!important;font-weight:750!important;margin-bottom:14px!important}
         @media(max-width:760px){.auth-shell{padding:14px!important}.auth-card{padding:20px!important;border-radius:18px!important}.auth-brand{align-items:flex-start!important;flex-direction:column!important}.auth-widgets,.auth-form{grid-template-columns:1fr!important}.auth-logo{width:130px!important;height:92px!important}.auth-logo img{width:120px!important;height:84px!important}.auth-brand h1{font-size:26px!important}}
-      `}</style>
+      
+      /* V6.5.13 CORE FUNCTIONALITY FIX 15 — Platform Owner branding alignment */
+      .platform-owner-auth-shell .auth-brand{
+        display:flex!important;flex-direction:row!important;align-items:center!important;justify-content:flex-start!important;
+        gap:18px!important;width:100%!important;box-sizing:border-box!important;text-align:left!important;
+      }
+      .platform-owner-auth-shell .auth-brand .auth-logo{
+        flex:0 0 88px!important;width:88px!important;height:68px!important;display:flex!important;align-items:center!important;justify-content:center!important;
+        margin:0!important;border-radius:14px!important;overflow:hidden!important;background:#fff!important;border:1px solid #dbe5ef!important;padding:4px!important;
+      }
+      .platform-owner-auth-shell .auth-brand .auth-logo img{width:100%!important;height:100%!important;object-fit:contain!important;display:block!important}
+      .platform-owner-auth-shell .auth-brand-copy{display:flex!important;flex-direction:column!important;align-items:flex-start!important;justify-content:center!important;min-width:0!important}
+      .platform-owner-auth-shell .auth-brand-copy h1{margin:0!important;line-height:1.12!important}
+      .platform-owner-auth-shell .auth-brand-copy p{margin:5px 0 0!important}
+      .platform-owner-auth-shell .auth-brand-copy em{display:block!important;margin:5px 0 0!important}
+      @media(max-width:600px){
+        .platform-owner-auth-shell .auth-brand{gap:12px!important}
+        .platform-owner-auth-shell .auth-brand .auth-logo{flex-basis:72px!important;width:72px!important;height:56px!important}
+        .platform-owner-auth-shell .auth-brand-copy h1{font-size:22px!important}
+      }
+`}</style>
       <div className="auth-brand"><div className="auth-logo"><img src="/apartcare-lite-logo.png" alt="ApartCare Lite"/></div><div><h1>ApartCare Lite</h1><p>Your daily partner in property care.</p><em>Helping you run your building beautifully.</em></div></div><div className="auth-widgets"><div className="auth-widget"><span>🏢</span><b>Property Operations</b><small>Maintenance, payments and residents in one place</small></div><div className="auth-widget"><span>📊</span><b>Financial Clarity</b><small>Connected dashboard, expenses and reports</small></div><div className="auth-widget"><span>🔐</span><b>Secure Roles</b><small>Admin and Viewer access with controlled sessions</small></div></div>
       {loginError&&<div className="message">{loginError}</div>}
       {showCreate ? <>
@@ -3053,6 +3073,125 @@ input[type="checkbox"]{
         .identity-header .apartment-brand h2{font-size:1.05rem!important}
         .identity-header .apartment-brand p{font-size:.72rem!important;line-height:1.2!important}
         .two-donuts{grid-template-columns:1fr!important}
+      }
+            /* V6.5.13 CORE FUNCTIONALITY FIX 15 — final application workspace layout system.
+         Desktop forms use compact multi-column grids; controls remain stacked inside each field.
+         Mobile intentionally collapses to one column for usability. */
+      .main .form-panel,.main .panel,.main .table-panel,.main .water-box{box-sizing:border-box!important}
+      .main .resident-form{
+        display:grid!important;grid-template-columns:repeat(4,minmax(0,1fr))!important;
+        gap:16px 18px!important;padding:18px!important;align-items:start!important;
+      }
+      .main .resident-form>label{
+        display:flex!important;flex-direction:column!important;gap:6px!important;width:100%!important;min-width:0!important;
+        align-self:start!important;color:#334e6f!important;font-weight:750!important;line-height:1.25!important;
+      }
+      .main .resident-form>label.full{grid-column:1/-1!important}
+      .main .resident-form>label>input,.main .resident-form>label>select,.main .resident-form>label>textarea{
+        width:100%!important;min-width:0!important;max-width:100%!important;box-sizing:border-box!important;
+        min-height:42px!important;height:auto!important;margin:0!important;
+      }
+      .main .resident-form>label>textarea{min-height:82px!important;resize:vertical!important}
+      .main .resident-form .form-actions{grid-column:1/-1!important;display:flex!important;align-items:center!important;gap:10px!important;margin-top:2px!important;padding-top:12px!important;border-top:1px solid #e6edf5!important}
+
+      /* Monthly Maintenance — compact four-column setup and water calculation. */
+      .main .maintenance-setup-grid{
+        display:grid!important;grid-template-columns:repeat(4,minmax(0,1fr))!important;gap:14px 16px!important;
+        padding:16px!important;align-items:start!important;
+      }
+      .main .maintenance-setup-grid>label{
+        display:flex!important;flex-direction:column!important;gap:6px!important;min-width:0!important;
+        color:#334e6f!important;font-weight:750!important;line-height:1.25!important;
+      }
+      .main .maintenance-setup-grid>label input,.main .maintenance-setup-grid>label select{
+        width:100%!important;min-width:0!important;box-sizing:border-box!important;min-height:42px!important;
+      }
+      .main .maintenance-setup-grid>label:has(input[type="checkbox"]){
+        position:relative!important;padding-top:0!important;
+      }
+      .main .maintenance-setup-grid>label input[type="checkbox"]{
+        width:16px!important;height:16px!important;min-width:16px!important;min-height:16px!important;
+        margin:0 7px 0 0!important;vertical-align:middle!important;align-self:flex-start!important;
+      }
+      .main .maintenance-setup-grid>label input[type="checkbox"] + *{min-width:0}
+      .main .water-box{padding:16px!important;margin-top:14px!important}
+      .main .water-box>h3{margin:0 0 12px!important}
+      .main .water-box .maintenance-setup-grid{border:0!important;box-shadow:none!important;padding:0!important;background:transparent!important}
+
+      /* Month toolbars: title, month selector and actions share one compact row. */
+      .main .month-heading{
+        display:flex!important;align-items:center!important;justify-content:space-between!important;gap:18px!important;
+        flex-wrap:wrap!important;width:100%!important;margin:0!important;padding:0 0 12px!important;
+      }
+      .main .month-heading>h2{margin:0!important;flex:1 1 auto!important;min-width:220px!important}
+      .main .month-selector{display:flex!important;align-items:center!important;gap:8px!important;flex:0 0 auto!important}
+      .main .month-selector label{display:inline-flex!important;align-items:center!important;gap:8px!important;margin:0!important;font-weight:750!important;color:#52657e!important;white-space:nowrap!important}
+      .main .month-selector input{width:160px!important;min-width:160px!important;min-height:42px!important}
+      .main .payment-period>.page-title-row{display:flex!important;align-items:center!important;justify-content:space-between!important;gap:16px!important;flex-wrap:wrap!important}
+      .main .payment-period>.page-title-row .help-text{flex:1 1 520px!important}
+      .main .payment-period>.page-title-row .form-actions{flex:0 0 auto!important;margin:0!important;padding:0!important;border:0!important}
+
+      /* Payment summary and Expense summary — horizontal KPI cards. */
+      .main .summary-grid,.main .expense-kpis,.main .kpi-grid{
+        display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:14px!important;width:100%!important;
+      }
+      .main .expense-kpis{grid-template-columns:repeat(4,minmax(0,1fr))!important}
+      .main .summary-grid>.card,.main .expense-kpis>.card,.main .kpi-grid>.kpi-card{min-width:0!important;width:100%!important}
+      .main .expense-kpis>.card{min-height:104px!important}
+
+      /* Expense entry — compact professional four-column layout. */
+      .main .professional-expense-form{display:grid!important;grid-template-columns:repeat(4,minmax(0,1fr))!important;gap:14px 16px!important;padding:18px!important;align-items:start!important}
+      .main .professional-expense-form label{min-width:0!important;width:100%!important}
+      .main .professional-expense-form label.wide{grid-column:span 2!important}
+      .main .professional-expense-form .form-actions{grid-column:1/-1!important;display:flex!important;align-items:center!important;gap:10px!important}
+
+      /* Reports — controls sized to the actual data type instead of full workspace width. */
+      .main .report-controls{
+        display:flex!important;align-items:flex-end!important;gap:12px!important;flex-wrap:wrap!important;
+        width:100%!important;box-sizing:border-box!important;
+      }
+      .main .report-controls>label{display:flex!important;flex-direction:column!important;gap:6px!important;flex:0 0 auto!important;width:auto!important;min-width:0!important;color:#334e6f!important;font-weight:750!important}
+      .main .report-controls>label select{width:220px!important;min-width:220px!important;max-width:280px!important;min-height:42px!important}
+      .main .report-controls>label input[type="month"]{width:160px!important;min-width:160px!important}
+      .main .report-controls>label select[value="2024"],.main .report-controls>label select[value="2025"],.main .report-controls>label select[value="2026"],.main .report-controls>label select[value="2027"]{width:120px!important;min-width:120px!important}
+      .main .period-options{display:flex!important;align-items:center!important;gap:8px!important;flex-wrap:wrap!important;width:max-content!important;max-width:100%!important}
+      .main .period-options>label:not(.radio){display:inline-flex!important;align-items:center!important;gap:7px!important;width:auto!important;min-width:0!important}
+      .main .period-options>label:not(.radio) select{width:120px!important;min-width:120px!important}
+      .main .period-options>label:not(.radio) input[type="month"]{width:160px!important;min-width:160px!important}
+      .main .report-tabs{display:flex!important;align-items:center!important;gap:8px!important;flex-wrap:wrap!important}
+      .main .report-tabs button{white-space:nowrap!important}
+
+      /* Dashboard — always horizontal on normal desktop widths. */
+      .main .dashboard-kpis{display:grid!important;grid-template-columns:repeat(6,minmax(125px,1fr))!important;gap:14px!important;width:100%!important;align-items:stretch!important}
+      .main .dashboard-kpis>.kpi-card{min-width:0!important;width:100%!important}
+      .main .two-donuts{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:20px!important;width:100%!important}
+
+      /* Module headers remain horizontal; only mobile intentionally stacks them. */
+      .main .page-title-row,.main .section-title-row{display:flex!important;align-items:center!important;justify-content:space-between!important;gap:16px!important;flex-wrap:wrap!important}
+      .main .page-title-row>div:first-child,.main .section-title-row>div:first-child{min-width:0!important;flex:1 1 auto!important}
+      .main .page-title-row>button,.main .section-title-row>button{flex:0 0 auto!important}
+
+      /* Settings / Administration / Utilities / Go-Live inherit the same compact grid. */
+      .main .utility-form{display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:14px 16px!important;padding:16px!important}
+      .main .utility-form .form-actions{grid-column:1/-1!important}
+      .main .history-toolbar{display:flex!important;align-items:flex-end!important;justify-content:space-between!important;gap:14px!important;flex-wrap:wrap!important}
+      .main .history-toolbar select{width:260px!important;min-width:260px!important}
+
+      @media(max-width:1250px){
+        .main .dashboard-kpis{grid-template-columns:repeat(3,minmax(0,1fr))!important}
+        .main .resident-form,.main .maintenance-setup-grid{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+        .main .professional-expense-form{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+        .main .utility-form{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+        .main .expense-kpis{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+      }
+      @media(max-width:800px){
+        .main .dashboard-kpis,.main .summary-grid,.main .expense-kpis,.main .kpi-grid,.main .two-donuts,.main .resident-form,.main .maintenance-setup-grid,.main .professional-expense-form,.main .utility-form{grid-template-columns:1fr!important}
+        .main .resident-form>label.full,.main .professional-expense-form label.wide{grid-column:auto!important}
+        .main .month-heading{align-items:flex-start!important;flex-direction:column!important}
+        .main .month-selector{width:100%!important}.main .month-selector input{width:100%!important;min-width:0!important}
+        .main .report-controls{align-items:stretch!important;flex-direction:column!important}.main .report-controls>label,.main .report-controls>label select,.main .report-controls>label input[type="month"]{width:100%!important;max-width:none!important;min-width:0!important}
+        .main .period-options{width:100%!important}
+        .main .history-toolbar select{width:100%!important;min-width:0!important}
       }
       `}</style>
       <header className="identity-header">
