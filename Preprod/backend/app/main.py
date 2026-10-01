@@ -3247,11 +3247,22 @@ def platform_update_subscription_plan(plan_id: str, data: SubscriptionPlanUpdate
 @app.get('/platform/subscriptions')
 def platform_subscriptions(x_auth_token: str | None = Header(default=None)):
     _platform_actor(x_auth_token)
+    migrated=_migrate_legacy_subscriptions()
+    if migrated:
+        _save_state()
+    # The console must always have one subscription row for every apartment account.
+    # This is also the repair path for accounts created by older V6.4/V6.5 builds.
     rows=[]
-    for sub in subscriptions.values():
+    created_missing=False
+    for account in tenant_accounts.values():
+        sub=_subscription_for_tenant(account.tenant_id)
+        if not sub:
+            sub=_create_subscription_for_tenant(account.tenant_id, account.created_at, "migration")
+            created_missing=True
         _refresh_subscription_status(sub)
-        account=tenant_accounts.get(sub.tenant_id)
-        rows.append({"subscription":sub.model_dump(),"summary":_subscription_summary(sub),"account":account.model_dump() if account else None})
+        rows.append({"subscription":sub.model_dump(),"summary":_subscription_summary(sub),"account":account.model_dump()})
+    if migrated or created_missing:
+        _save_state()
     return sorted(rows,key=lambda x:(x["summary"].get("status", ""), (x["account"] or {}).get("apartment_name", "").lower()))
 
 @app.get('/platform/accounts/{tenant_id}/subscription')
@@ -3437,6 +3448,9 @@ def platform_change_own_password(data: ChangePasswordInput, x_auth_token: str | 
 @app.get('/platform/accounts', response_model=list[TenantAccount])
 def platform_accounts(x_auth_token: str | None = Header(default=None)):
     _platform_actor(x_auth_token)
+    migrated=_migrate_legacy_subscriptions()
+    if migrated:
+        _save_state()
     today=date.today().isoformat()
     result=[]
     for a in tenant_accounts.values():
@@ -3499,7 +3513,7 @@ def platform_create_account(data: PlatformTenantCreateInput, x_auth_token: str |
     # Seed the standard utility directory inside the new tenant namespace.
     for category_name in DEFAULT_UTILITY_CATEGORIES:
         utility_categories.append(UtilityCategory(id=f"UTC-{uuid4()}",apartment_id=tid,name=category_name,active=True,created_at=now,updated_at=now,created_by="system"))
-    platform_audit.append({"at":now,"event":"Property Account Created","actor":platform_owner.username if platform_owner else "system","detail":account.account_id})
+    platform_audit.append({"at":now,"event":"Property Account Created","actor":platform_owner.username if platform_owner else "system","tenant_id":tid,"detail":account.account_id})
     _save_state()
     return account
 
@@ -3549,8 +3563,18 @@ def platform_unlock_account(tenant_id: str, reason: str = Body(default="", embed
 @app.get('/platform/accounts/{tenant_id}/validity-history', response_model=list[TenantAccountValidityHistory])
 def platform_account_validity_history(tenant_id: str, x_auth_token: str | None = Header(default=None)):
     _platform_actor(x_auth_token)
-    if tenant_id not in tenant_accounts: raise HTTPException(status_code=404, detail="Property account not found.")
-    return sorted([h for h in tenant_account_validity_history if h.tenant_id==tenant_id], key=lambda h:h.changed_at, reverse=True)
+    account=tenant_accounts.get(tenant_id)
+    if not account: raise HTTPException(status_code=404, detail="Property account not found.")
+    rows=[h for h in tenant_account_validity_history if h.tenant_id==tenant_id]
+    if not rows:
+        tenant_account_validity_history.append(TenantAccountValidityHistory(
+            id=str(uuid4()), tenant_id=account.tenant_id, account_id=account.account_id,
+            valid_from=account.valid_from, valid_to=account.valid_to, status=account.status,
+            action="Migrated Baseline", changed_at=account.created_at, changed_by="system",
+            reason="Validity history baseline created for this apartment account."))
+        _save_state()
+        rows=[h for h in tenant_account_validity_history if h.tenant_id==tenant_id]
+    return sorted(rows, key=lambda h:h.changed_at, reverse=True)
 
 
 def _purge_tenant_data(tenant_id: str) -> dict:
@@ -3704,7 +3728,14 @@ def _platform_history_rows() -> list[dict]:
         account=tenant_accounts.get(h.tenant_id) if h.tenant_id else None
         rows.append({**h.model_dump(),"scope":"Tenant","account_id":account.account_id if account else "","apartment_name":account.apartment_name if account else ""})
     for event in platform_audit:
-        rows.append({"id":f"platform-{event.get('at','')}-{event.get('event','')}","username":event.get('actor',''),"user_id":None,"tenant_id":"","status":"Success","event":event.get('event','Platform Event'),"at":event.get('at',''),"reason":event.get('detail',''),"scope":"Platform","account_id":"","apartment_name":"Platform"})
+        detail=str(event.get('detail','') or '')
+        event_tenant=str(event.get('tenant_id','') or '')
+        account=None
+        if event_tenant:
+            account=tenant_accounts.get(event_tenant)
+        if account is None:
+            account=next((a for a in tenant_accounts.values() if a.account_id and a.account_id in detail),None)
+        rows.append({"id":f"platform-{event.get('at','')}-{event.get('event','')}","username":event.get('actor',''),"user_id":None,"tenant_id":account.tenant_id if account else "","status":"Success","event":event.get('event','Platform Event'),"at":event.get('at',''),"reason":detail,"scope":"Platform","account_id":account.account_id if account else "","apartment_name":account.apartment_name if account else "Platform"})
     return rows
 
 def _history_matches(row: dict, q: str = "", account_id: str = "", user_id: str = "", event_type: str = "", from_date: str = "", to_date: str = "") -> bool:
@@ -3954,6 +3985,9 @@ def _save_state():
         'tenant_accounts':{k:v.model_dump() for k,v in tenant_accounts.items()},'tenant_account_validity_history':_dump_models(tenant_account_validity_history),'tenant_users':{k:_dump_models(v) for k,v in tenant_users.items()},'tenant_passwords':tenant_passwords,'platform_audit':platform_audit,
         'subscription_settings':subscription_settings.model_dump(),'subscription_plans':{k:v.model_dump() for k,v in subscription_plans.items()},'subscriptions':{k:v.model_dump() for k,v in subscriptions.items()},'subscription_history':_dump_models(subscription_history),'subscription_events':_dump_models(subscription_events),'subscription_payments':_dump_models(subscription_payments),
         'auth_sessions':dict(auth_sessions),
+        'platform_sessions':dict(platform_sessions),
+        'tenant_sessions':{k:list(v) for k,v in tenant_sessions.items()},
+        'platform_support_sessions':{k:{'tenant_id':v[0],'user':v[1].model_dump()} for k,v in platform_support_sessions.items()},
         'session_timeout_settings':session_timeout_settings.model_dump()
     }
     if DATABASE_URL:
@@ -3962,7 +3996,7 @@ def _save_state():
         STATE_FILE.write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8')
 
 def _load_state():
-    global charge_settings,charge_history,payments,payment_month_locks,payment_lock_events,expenses,expense_lock_events,expense_deletion_history,admin_users,admin_passwords,login_history,watchmen,watchman_history,utility_categories,utility_category_history,utility_contacts,utility_contact_history,opening_balances,opening_balance_history,residents,flat_history,maintenance_rows,water_headers,platform_owner,platform_owner_password,platform_password_policy_initialized,tenant_accounts,tenant_account_validity_history,tenant_users,tenant_passwords,platform_audit,session_timeout_settings,auth_sessions,subscription_settings,subscription_plans,subscriptions,subscription_history,subscription_events,subscription_payments
+    global charge_settings,charge_history,payments,payment_month_locks,payment_lock_events,expenses,expense_lock_events,expense_deletion_history,admin_users,admin_passwords,login_history,watchmen,watchman_history,utility_categories,utility_category_history,utility_contacts,utility_contact_history,opening_balances,opening_balance_history,residents,flat_history,maintenance_rows,water_headers,platform_owner,platform_owner_password,platform_password_policy_initialized,tenant_accounts,tenant_account_validity_history,tenant_users,tenant_passwords,platform_audit,session_timeout_settings,auth_sessions,platform_sessions,tenant_sessions,platform_support_sessions,subscription_settings,subscription_plans,subscriptions,subscription_history,subscription_events,subscription_payments
     try:
         d = _db_load_state() if DATABASE_URL else (json.loads(STATE_FILE.read_text(encoding='utf-8')) if STATE_FILE.exists() else None)
         if d is None:
@@ -3998,6 +4032,9 @@ def _load_state():
             locked_month=_effective_operational_start_month(_account.tenant_id)
             _account.data_start_month=locked_month
         tenant_account_validity_history=[TenantAccountValidityHistory(**x) for x in d.get('tenant_account_validity_history',[])]; tenant_users={k:[AdminUser(**u) for u in v] for k,v in d.get('tenant_users',{}).items()}; tenant_passwords=d.get('tenant_passwords',{}); platform_audit=d.get('platform_audit',[]); auth_sessions=dict(d.get('auth_sessions',{}))
+        platform_sessions=dict(d.get('platform_sessions',{}))
+        tenant_sessions={k:tuple(v) for k,v in d.get('tenant_sessions',{}).items()}
+        platform_support_sessions={k:(v.get('tenant_id',''),AdminUser(**v.get('user',{}))) for k,v in d.get('platform_support_sessions',{}).items() if v.get('user')}
         # FIX 12: clear only the legacy first-login flag on persisted users.
         # Explicit password resets change updated_at and therefore remain forced.
         for _users in tenant_users.values():
