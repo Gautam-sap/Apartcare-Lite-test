@@ -231,7 +231,7 @@ export default function Home(){
   const [platformSubscriptions,setPlatformSubscriptions]=useState<any[]>([]);
   const [platformSubscriptionSearch,setPlatformSubscriptionSearch]=useState('');
   const [platformSubscriptionMessage,setPlatformSubscriptionMessage]=useState('');
-  const [newPlanForm,setNewPlanForm]=useState({code:'',name:'',description:'',monthly_price:'',annual_price:''});
+  const [newPlanForm,setNewPlanForm]=useState({code:'',name:'',description:'',monthly_price:'',annual_price:'',trial_enabled:false,trial_value:'',trial_unit:'Days'});
   const [tenantSubscription,setTenantSubscription]=useState<any|null>(null);
   const [tenantSubscriptionMessage,setTenantSubscriptionMessage]=useState('');
   const [platformValidityHistory,setPlatformValidityHistory]=useState<any[]>([]);
@@ -410,7 +410,7 @@ export default function Home(){
     // the previous React input instance after logout/navigation.
     setPlatformLogin({username:'',password:''});
     setPlatformBootstrap(prev=>({...prev,username:'',password:''}));
-    setPlatformMessage('');setPlatformMustChangePassword(false);setPlatformAccountSearch('');setPlatformValidityHistory([]);setPlatformHistoryTenantId('');setShowUnlockDialog(false);setOpeningEditMode(false);setUnlockJustification('');
+    setPlatformMessage('');setPlatformMustChangePassword(false);setPlatformAccountSearch('');setPlatformRecoveryProperty(null);setPlatformRecoveryTenantId('');setPlatformRecoveryAccountSearch('');setPlatformRecoveryUserSearch('');setPlatformLoginHistory([]);setPlatformValidityHistory([]);setPlatformHistoryTenantId('');setPlatformPlans([]);setPlatformSubscriptions([]);setShowUnlockDialog(false);setOpeningEditMode(false);setUnlockJustification('');
     setPlatformChangeForm({new_password:'',confirm_password:''});
     setPlatformChangeMessage('');setPlatformForgot({username:'',email:''});
     setPlatformReset({token:'',new_password:'',confirm_password:''});
@@ -572,10 +572,10 @@ export default function Home(){
   const createPlatformPlan=async(e:React.FormEvent)=>{
     e.preventDefault();
     if(!newPlanForm.code||!newPlanForm.name){setPlatformSubscriptionMessage('Plan Code and Plan Name are required.');return;}
-    const r=await fetch(`${API}/api/platform/subscription/plans`,{method:'POST',headers:{'Content-Type':'application/json','X-Auth-Token':platformToken},body:JSON.stringify({code:newPlanForm.code,name:newPlanForm.name,description:newPlanForm.description,monthly_price:Number(newPlanForm.monthly_price||0),annual_price:Number(newPlanForm.annual_price||0),currency:'INR',active:true,features:{Residents:true,'Monthly Maintenance':true,Payments:true,Expenses:true,Utilities:true,Reports:true,'WhatsApp Sharing':true}})});
+    const r=await fetch(`${API}/api/platform/subscription/plans`,{method:'POST',headers:{'Content-Type':'application/json','X-Auth-Token':platformToken},body:JSON.stringify({code:newPlanForm.code,name:newPlanForm.name,description:newPlanForm.description,monthly_price:Number(newPlanForm.monthly_price||0),annual_price:Number(newPlanForm.annual_price||0),currency:'INR',active:true,trial_enabled:Boolean(newPlanForm.trial_enabled),trial_value:newPlanForm.trial_enabled?Number(newPlanForm.trial_value||0):0,trial_unit:newPlanForm.trial_unit,features:{Residents:true,'Monthly Maintenance':true,Payments:true,Expenses:true,Utilities:true,Reports:true,'WhatsApp Sharing':true}})});
     const d=await r.json().catch(()=>null);
     if(!r.ok){setPlatformSubscriptionMessage(d?.detail||'Unable to create plan.');return;}
-    setNewPlanForm({code:'',name:'',description:'',monthly_price:'',annual_price:''});setPlatformSubscriptionMessage(`${d.name} plan created.`);await loadPlatformSubscriptions(platformToken);
+    setNewPlanForm({code:'',name:'',description:'',monthly_price:'',annual_price:'',trial_enabled:false,trial_value:'',trial_unit:'Days'});setPlatformSubscriptionMessage(`${d.name} plan created${d.trial_enabled?' as a '+d.trial_value+' '+d.trial_unit+' Trial Plan':''}.`);await loadPlatformSubscriptions(platformToken);
   };
   const updatePlanPrice=async(plan:any,field:'monthly_price'|'annual_price',value:string)=>{
     const r=await fetch(`${API}/api/platform/subscription/plans/${encodeURIComponent(plan.id)}`,{method:'PATCH',headers:{'Content-Type':'application/json','X-Auth-Token':platformToken},body:JSON.stringify({[field]:Number(value||0)})});
@@ -594,7 +594,7 @@ export default function Home(){
   const platformAssignPlan=async(row:any,planId:string)=>{
     if(!planId)return;
     const r=await fetch(`${API}/api/platform/accounts/${encodeURIComponent(row.account.tenant_id)}/subscription/assign-plan/${encodeURIComponent(planId)}`,{method:'POST',headers:{'X-Auth-Token':platformToken}});
-    const d=await r.json().catch(()=>null);if(!r.ok){setPlatformSubscriptionMessage(d?.detail||'Unable to assign plan.');return;}setPlatformSubscriptionMessage(`${d.summary?.plan?.name||'Plan'} assigned to ${row.account.account_id}. Payment remains pending until the gateway confirms it.`);await loadPlatformSubscriptions(platformToken);
+    const d=await r.json().catch(()=>null);if(!r.ok){setPlatformSubscriptionMessage(d?.detail||'Unable to assign plan.');return;}setPlatformSubscriptionMessage(d.summary?.subscription_type==='TRIAL'?`${d.summary?.plan?.name||'Trial Plan'} assigned to ${row.account.account_id}. Trial is active through ${d.summary?.trial_end_date?formatDate(d.summary.trial_end_date):'the configured end date'}.`:`${d.summary?.plan?.name||'Plan'} assigned to ${row.account.account_id}. Payment remains pending until the gateway confirms it.`);await loadPlatformSubscriptions(platformToken);
   };
   const loadTenantSubscription=async(token:string)=>{
     if(!token)return;const r=await fetch(`${API}/api/subscription`,{headers:{'X-ApartCare-Token':token}});const d=await r.json().catch(()=>null);if(r.ok){setTenantSubscription(d);setTenantSubscriptionMessage('');}else{setTenantSubscriptionMessage(d?.detail||'Unable to load subscription status.');}
@@ -655,11 +655,10 @@ export default function Home(){
       // Show the Platform Owner console immediately after authentication.
       // Account/audit/subscription data can hydrate in parallel without making
       // the login response wait for every secondary API request/cold start.
-      void Promise.all([
-        loadPlatformAccounts(d.token),
-        loadPlatformLoginHistory(d.token),
-        loadPlatformSubscriptions(d.token)
-      ]);
+      // Load only the account workspace during sign-in. Billing, audit and
+      // recovery hydrate when their tabs are opened, keeping Platform Owner
+      // login responsive instead of firing several database requests at once.
+      void loadPlatformAccounts(d.token);
     }catch(err:any){
       setPlatformMessage(`Unable to contact the ApartCare backend. Please confirm the backend is running on ${API}. ${err?.message||''}`.trim());
     }finally{
@@ -714,6 +713,17 @@ export default function Home(){
     const r=await fetch(`${API}/api/platform/accounts/${encodeURIComponent(tenantId)}/validity-history`,{headers:{'X-Auth-Token':token}});
     const d=await r.json().catch(()=>null);if(!r.ok){setPlatformMessage(d?.detail||'Unable to load account validity history.');return;}setPlatformValidityHistory(Array.isArray(d)?d:[]);setPlatformHistoryTenantId(tenantId);
   };
+  useEffect(()=>{
+    if(!platformUser||!platformToken)return;
+    if(platformConsoleTab==='accounts') void loadPlatformAccounts(platformToken);
+    if(platformConsoleTab==='billing') void loadPlatformSubscriptions(platformToken);
+    if(platformConsoleTab==='audit') void loadPlatformLoginHistory(platformToken);
+    if(platformConsoleTab==='recovery'){
+      void loadPlatformAccounts(platformToken);
+      if(platformRecoveryTenantId) void loadPlatformRecoveryProperty(platformToken,platformRecoveryTenantId);
+    }
+  },[platformConsoleTab,platformUser,platformToken]);
+
   const platformDeleteAccount=async(account:any)=>{
     setPlatformMessage('Permanent Apartment Account deletion is disabled in V6.4.48. Use Lock / Unlock so the account and its time history remain auditable.');
   };
@@ -2280,7 +2290,7 @@ button{cursor:pointer}
                 <div className="subscription-policy-card"><span>Complimentary</span><strong>{platformSubscriptionSettings.allow_complimentary?'Allowed':'Disabled'}</strong><small>Product Owner controlled</small></div>
               </div>
               <div className="subscription-settings-form">
-                <label className="checkbox-inline"><input type="checkbox" checked={Boolean(platformSubscriptionSettings.trial_enabled)} onChange={e=>setPlatformSubscriptionSettings({...platformSubscriptionSettings,trial_enabled:e.target.checked})}/> Enable Trial for new accounts (optional)</label><label>Default Plan for New Accounts<select value={platformSubscriptionSettings.default_plan_id||''} onChange={e=>setPlatformSubscriptionSettings({...platformSubscriptionSettings,default_plan_id:e.target.value})}><option value="">Select Default Plan</option>{platformPlans.filter((p:any)=>p.active).map((p:any)=><option key={p.id} value={p.id}>{p.name} — ₹{Number(p.monthly_price).toLocaleString('en-IN')}/mo</option>)}</select><small className="help-text">New accounts inherit this plan unless the Product Owner assigns another plan.</small></label>
+                <label className="checkbox-inline"><input type="checkbox" checked={Boolean(platformSubscriptionSettings.trial_enabled)} onChange={e=>setPlatformSubscriptionSettings({...platformSubscriptionSettings,trial_enabled:e.target.checked})}/> Enable Trial for new accounts (optional)</label><label>Default Plan for New Accounts<select value={platformSubscriptionSettings.default_plan_id||''} onChange={e=>setPlatformSubscriptionSettings({...platformSubscriptionSettings,default_plan_id:e.target.value})}><option value="">Select Default Plan</option>{platformPlans.filter((p:any)=>p.active).map((p:any)=><option key={p.id} value={p.id}>{p.name}{p.trial_enabled?` — Trial ${p.trial_value} ${p.trial_unit}`:` — ₹${Number(p.monthly_price).toLocaleString('en-IN')}/mo`}</option>)}</select><small className="help-text">New accounts inherit this plan unless the Product Owner assigns another plan.</small></label>
                 <label>Trial Duration<input type="number" min="1" value={platformSubscriptionSettings.default_trial_value===0?'':platformSubscriptionSettings.default_trial_value} onChange={e=>setPlatformSubscriptionSettings({...platformSubscriptionSettings,default_trial_value:e.target.value===''?0:Number(e.target.value)})}/></label>
                 <label>Unit<select value={platformSubscriptionSettings.default_trial_unit} onChange={e=>setPlatformSubscriptionSettings({...platformSubscriptionSettings,default_trial_unit:e.target.value})}><option>Days</option><option>Months</option></select></label>
                 <label>Grace Period<input type="number" min="0" value={platformSubscriptionSettings.default_grace_value===0?'':platformSubscriptionSettings.default_grace_value} onChange={e=>setPlatformSubscriptionSettings({...platformSubscriptionSettings,default_grace_value:e.target.value===''?0:Number(e.target.value)})}/></label>
@@ -2294,9 +2304,9 @@ button{cursor:pointer}
             </>}
             <div className="subscription-plan-header"><div><h3>Plans</h3><p className="help-text">Prices are Product Owner controlled. Gateway charging remains server-side and tenant-isolated.</p></div></div>
             <div className="subscription-plan-grid">{platformPlans.map(plan=><article className="subscription-plan-card" key={plan.id}><div className="plan-top"><span>{plan.name}</span><b>{plan.active?'ACTIVE':'INACTIVE'}</b></div><p>{plan.description}</p><label>Monthly ₹<input type="number" min="0" value={plan.monthly_price} onChange={e=>updatePlanPrice(plan,'monthly_price',e.target.value)}/></label><label>Annual ₹<input type="number" min="0" value={plan.annual_price} onChange={e=>updatePlanPrice(plan,'annual_price',e.target.value)}/></label><small>{Object.entries(plan.features||{}).filter(([,v])=>v).map(([k])=>k).join(' • ')}</small></article>)}</div>
-            <form className="subscription-new-plan" onSubmit={createPlatformPlan}><h3>Create New Plan</h3><input placeholder="Plan Code" value={newPlanForm.code} onChange={e=>setNewPlanForm({...newPlanForm,code:e.target.value.toUpperCase()})}/><input placeholder="Plan Name" value={newPlanForm.name} onChange={e=>setNewPlanForm({...newPlanForm,name:e.target.value})}/><input placeholder="Description" value={newPlanForm.description} onChange={e=>setNewPlanForm({...newPlanForm,description:e.target.value})}/><input type="number" min="0" placeholder="Monthly ₹" value={newPlanForm.monthly_price} onChange={e=>setNewPlanForm({...newPlanForm,monthly_price:e.target.value})}/><input type="number" min="0" placeholder="Annual ₹" value={newPlanForm.annual_price} onChange={e=>setNewPlanForm({...newPlanForm,annual_price:e.target.value})}/><button type="submit">＋ Create Plan</button></form>
+            <form className="subscription-new-plan" onSubmit={createPlatformPlan}><h3>Create New Plan</h3><input placeholder="Plan Code" value={newPlanForm.code} onChange={e=>setNewPlanForm({...newPlanForm,code:e.target.value.toUpperCase()})}/><input placeholder="Plan Name" value={newPlanForm.name} onChange={e=>setNewPlanForm({...newPlanForm,name:e.target.value})}/><input placeholder="Description" value={newPlanForm.description} onChange={e=>setNewPlanForm({...newPlanForm,description:e.target.value})}/><input type="number" min="0" placeholder="Monthly ₹" value={newPlanForm.monthly_price} onChange={e=>setNewPlanForm({...newPlanForm,monthly_price:e.target.value})}/><input type="number" min="0" placeholder="Annual ₹" value={newPlanForm.annual_price} onChange={e=>setNewPlanForm({...newPlanForm,annual_price:e.target.value})}/><label className="trial-plan-toggle"><input type="checkbox" checked={newPlanForm.trial_enabled} onChange={e=>setNewPlanForm({...newPlanForm,trial_enabled:e.target.checked})}/> Trial Plan</label><input className="trial-duration-input" type="number" min="1" placeholder="Trial duration" value={newPlanForm.trial_value} disabled={!newPlanForm.trial_enabled} onChange={e=>setNewPlanForm({...newPlanForm,trial_value:e.target.value})}/><select className="trial-unit-select" value={newPlanForm.trial_unit} disabled={!newPlanForm.trial_enabled} onChange={e=>setNewPlanForm({...newPlanForm,trial_unit:e.target.value})}><option>Days</option><option>Months</option><option>Years</option></select><button type="submit">＋ Create Plan</button><small className="trial-plan-help">Enable Trial Plan to create a Product Owner controlled duration. Assigning this plan to an account starts the configured trial immediately.</small></form>
             <div className="subscription-table-toolbar"><input value={platformSubscriptionSearch} onChange={e=>setPlatformSubscriptionSearch(e.target.value)} placeholder="Search Account / Apartment / Plan / Status"/><button type="button" className="secondary" onClick={()=>loadPlatformSubscriptions(platformToken)}>↻ Refresh</button></div>
-            <div className="table-scroll business-grid"><table className="subscription-table"><thead><tr><th>Account</th><th>Apartment</th><th>Type</th><th>Plan</th><th>Status</th><th>Payment</th><th>Trial / Validity</th><th>Actions</th></tr></thead><tbody>{platformSubscriptions.filter((row:any)=>{const q=platformSubscriptionSearch.trim().toLowerCase();if(!q)return true;const a=row.account||{},s=row.subscription||{},sum=row.summary||{};return [a.account_id,a.apartment_name,a.account_mobile,s.subscription_type,s.status,sum.plan?.name].some((v:any)=>String(v||'').toLowerCase().includes(q));}).map((row:any)=><tr key={row.subscription.id}><td><b>{row.account.account_id}</b></td><td>{row.account.apartment_name}<small>{row.account.city}, {row.account.state}</small></td><td><span className={`subscription-type type-${String(row.subscription.subscription_type).toLowerCase()}`}>{row.subscription.subscription_type}</span></td><td><select value={row.subscription.plan_id||''} onChange={e=>platformAssignPlan(row,e.target.value)}><option value="">Unassigned</option>{platformPlans.filter((p:any)=>p.active).map((p:any)=><option key={p.id} value={p.id}>{p.name} — ₹{Number(p.monthly_price).toLocaleString('en-IN')}/mo</option>)}</select></td><td><span className={`subscription-status status-${String(row.summary.status).toLowerCase()}`}>{row.summary.status}</span>{row.summary.days_remaining!==null&&<small>{row.summary.days_remaining} days</small>}</td><td>{row.summary.payment_status}</td><td>{row.subscription.trial_end_date?<>Trial: {formatDate(row.subscription.trial_end_date)}<small>{row.subscription.grace_end_date?`Grace: ${formatDate(row.subscription.grace_end_date)}`:''}</small></>:row.subscription.end_date?`Valid to ${formatDate(row.subscription.end_date)}`:'—'}</td><td className="subscription-actions">{row.subscription.subscription_type==='TRIAL'&&<button type="button" className="secondary" onClick={()=>platformExtendTrialFromSubscription(row)}>＋ Extend Trial</button>}<button type="button" className="secondary" onClick={()=>platformGrantComplimentary(row)}>🎁 Complimentary</button></td></tr>)}</tbody></table></div>
+            <div className="table-scroll business-grid"><table className="subscription-table"><thead><tr><th>Account</th><th>Apartment</th><th>Type</th><th>Plan</th><th>Status</th><th>Payment</th><th>Trial / Validity</th><th>Actions</th></tr></thead><tbody>{platformSubscriptions.filter((row:any)=>{const q=platformSubscriptionSearch.trim().toLowerCase();if(!q)return true;const a=row.account||{},s=row.subscription||{},sum=row.summary||{};return [a.account_id,a.apartment_name,a.account_mobile,s.subscription_type,s.status,sum.plan?.name].some((v:any)=>String(v||'').toLowerCase().includes(q));}).map((row:any)=><tr key={row.subscription.id}><td><b>{row.account.account_id}</b></td><td>{row.account.apartment_name}<small>{row.account.city}, {row.account.state}</small></td><td><span className={`subscription-type type-${String(row.subscription.subscription_type).toLowerCase()}`}>{row.subscription.subscription_type}</span></td><td><select value={row.subscription.plan_id||''} onChange={e=>platformAssignPlan(row,e.target.value)}><option value="">Unassigned</option>{platformPlans.filter((p:any)=>p.active).map((p:any)=><option key={p.id} value={p.id}>{p.name}{p.trial_enabled?` — Trial ${p.trial_value} ${p.trial_unit}`:` — ₹${Number(p.monthly_price).toLocaleString('en-IN')}/mo`}</option>)}</select></td><td><span className={`subscription-status status-${String(row.summary.status).toLowerCase()}`}>{row.summary.status}</span>{row.summary.days_remaining!==null&&<small>{row.summary.days_remaining} days</small>}</td><td>{row.summary.payment_status}</td><td>{row.subscription.trial_end_date?<>Trial: {formatDate(row.subscription.trial_end_date)}<small>{row.subscription.grace_end_date?`Grace: ${formatDate(row.subscription.grace_end_date)}`:''}</small></>:row.subscription.end_date?`Valid to ${formatDate(row.subscription.end_date)}`:'—'}</td><td className="subscription-actions">{row.subscription.subscription_type==='TRIAL'&&<button type="button" className="secondary" onClick={()=>platformExtendTrialFromSubscription(row)}>＋ Extend Trial</button>}<button type="button" className="secondary" onClick={()=>platformGrantComplimentary(row)}>🎁 Complimentary</button></td></tr>)}</tbody></table></div>
           </section>}
 
           {platformConsoleTab==='audit' && <section className="panel platform-property audit-history-console"><div className="section-title-row"><div><h2>🔐 Global Login & Audit History</h2><p className="subtitle">Search, filter, download or delete only records matching the entered criteria. Account and User filters are tenant-aware.</p></div><span className="audit-count-badge">{platformLoginHistory.length} shown</span></div><div className="audit-filter-grid"><label className="wide">🔎 Search<input value={platformAuditSearch} onChange={e=>setPlatformAuditSearch(e.target.value)} placeholder="Account / Apartment / User / Event / Details"/></label><label>Account Number<input value={platformAuditAccount} onChange={e=>setPlatformAuditAccount(e.target.value)} placeholder="IN-TS-ACL-..."/></label><label>User ID<input value={platformAuditUser} onChange={e=>setPlatformAuditUser(e.target.value)} placeholder="User ID"/></label><label>Event<select value={platformAuditEvent} onChange={e=>setPlatformAuditEvent(e.target.value)}><option value="">All Events</option><option>Login</option><option>Logout</option><option>Failed Login</option><option>Password Changed</option><option>Password Reset</option><option>Apartment Account Created</option><option>Audit History Purged</option></select></label><label>From Date<input type="date" lang="en-GB" value={platformAuditFrom} onChange={e=>setPlatformAuditFrom(e.target.value)}/></label><label>To Date<input type="date" lang="en-GB" value={platformAuditTo} onChange={e=>setPlatformAuditTo(e.target.value)}/></label></div><div className="audit-toolbar"><button type="button" onClick={()=>loadPlatformLoginHistory(platformToken)}>🔎 Apply Filters</button><button type="button" className="secondary" onClick={()=>{setPlatformAuditSearch('');setPlatformAuditAccount('');setPlatformAuditUser('');setPlatformAuditEvent('');setPlatformAuditFrom('');setPlatformAuditTo('');setTimeout(()=>loadPlatformLoginHistory(platformToken),0)}}>↻ Reset</button><button type="button" className="secondary" onClick={downloadPlatformAuditHistory}>⬇ Download CSV</button><button type="button" className="danger" onClick={purgePlatformAuditHistory}>🗑 Delete Matching Records</button></div><div className="audit-safety-note">⚠️ Delete uses <b>AND criteria</b>: every populated filter must match. A blank field means “Any”. The purge event itself is retained.</div><div className="table-scroll business-grid audit-results-scroll"><table><thead><tr><th>Date / Time</th><th>Account Number</th><th>Apartment</th><th>User ID</th><th>Event</th><th>Status</th><th>Reason / Details</th></tr></thead><tbody>{platformLoginHistory.length===0?<tr><td colSpan={7} className="empty">No records match the selected criteria.</td></tr>:platformLoginHistory.map((h:any,idx:number)=><tr key={`${h.id||'h'}-${idx}`}><td>{formatDateTime(h.at)}</td><td>{h.account_id||'Platform'}</td><td>{h.apartment_name||'Platform'}</td><td>{h.username||'—'}</td><td><b>{h.event||'—'}</b></td><td>{h.status||'—'}</td><td>{h.reason||'—'}</td></tr>)}</tbody></table></div></section>}
@@ -3193,6 +3203,50 @@ input[type="checkbox"]{
         .main .period-options{width:100%!important}
         .main .history-toolbar select{width:100%!important;min-width:0!important}
       }
+
+      /* V6.5.13 CLEAN UI BUILD 2 — professional workspace frame, compact KPIs and true circular donuts. */
+      .main{padding-left:24px!important;padding-right:24px!important;padding-bottom:36px!important;box-sizing:border-box!important}
+      .main>.identity-header,.main>.header-divider{margin-left:-24px!important;margin-right:-24px!important}
+      .main>.identity-header{padding-left:28px!important;padding-right:28px!important}
+      .main>.header-divider{width:auto!important}
+      .main>.panel,.main>.form-panel,.main>.table-panel,.main>.period-panel,.main>.water-box,.main>.utility-panel,.main>.report-workspace,.main>.individual-statement-panel,.main>.import-panel,.main>.golive-panel,.main>.tenant-subscription-panel{margin-left:0!important;margin-right:0!important}
+      .main .kpi-card,.main .expense-kpis>.card,.main .summary-grid>.card,.main .report-kpi{min-height:96px!important;padding:14px 16px!important;border-radius:14px!important}
+      .main .kpi-card .value,.main .expense-kpis .value{font-size:1.55rem!important}
+      .main .kpi-card .label,.main .expense-kpis .label{font-size:.82rem!important;line-height:1.25!important}
+      .main .dashboard-kpis{gap:12px!important;grid-template-columns:repeat(6,minmax(0,1fr))!important}
+      .main .dashboard-kpis>.kpi-card{min-height:96px!important}
+      .main .premium-donut-panel{min-height:390px!important;padding:22px!important}
+      .main .premium-donut-row{min-height:300px!important;gap:28px!important}
+      .main .premium-donut-chart{width:230px!important;height:230px!important;min-width:230px!important;min-height:230px!important;max-width:230px!important;max-height:230px!important;aspect-ratio:1/1!important;flex:0 0 230px!important;border-radius:50%!important}
+      .main .premium-hole{inset:62px!important}
+      .main .premium-hole strong{font-size:1.15rem!important}
+      .main .premium-legend{min-width:150px!important;gap:10px!important}
+      .main .premium-legend div{grid-template-columns:12px 1fr auto!important;gap:7px!important}
+
+      /* Platform Owner: one clean brand row; remove the duplicate logo from the secondary header. */
+      .po-top-header{display:flex!important;align-items:center!important;justify-content:flex-end!important;gap:18px!important;padding:12px 0!important}
+      .po-top-header .po-brand-block{display:none!important}
+      .po-top-header .po-user-meta{display:flex!important;align-items:center!important;justify-content:flex-end!important;gap:12px!important;flex-wrap:nowrap!important}
+      .po-security-pill,.po-user-pill{white-space:nowrap!important}
+      .po-page-header{display:flex!important;align-items:center!important;justify-content:space-between!important;gap:20px!important;flex-wrap:nowrap!important}
+      .po-page-header>div:first-child{min-width:0!important;flex:1 1 auto!important}
+      .po-page-header .po-header-status{flex:0 0 auto!important}
+      .platform-owner-auth-shell .auth-brand{display:flex!important;flex-direction:row!important;align-items:center!important;gap:18px!important}
+      .platform-owner-auth-shell .auth-brand-copy{min-width:0!important;display:grid!important;grid-template-columns:auto auto auto!important;align-items:baseline!important;column-gap:14px!important;row-gap:2px!important}
+      .platform-owner-auth-shell .auth-brand-copy h1{grid-column:1/-1!important;margin:0!important}
+      .platform-owner-auth-shell .auth-brand-copy p,.platform-owner-auth-shell .auth-brand-copy em{margin:0!important}
+
+      /* Product Owner plan builder — trial duration is part of the plan, not a hidden global default. */
+      .subscription-new-plan{display:grid!important;grid-template-columns:1fr 1.15fr 1.8fr 1fr 1fr auto 120px 125px auto!important;gap:10px!important;align-items:end!important}
+      .subscription-new-plan h3{grid-column:1/-1!important;margin:0 0 2px!important}
+      .subscription-new-plan input,.subscription-new-plan select{width:100%!important;min-width:0!important;box-sizing:border-box!important}
+      .subscription-new-plan .trial-plan-toggle{display:inline-flex!important;align-items:center!important;gap:7px!important;min-height:42px!important;white-space:nowrap!important;font-weight:800!important;color:#334e6f!important}
+      .subscription-new-plan .trial-plan-toggle input{width:16px!important;height:16px!important;min-width:16px!important}
+      .subscription-new-plan .trial-plan-help{grid-column:1/-1!important;color:#64748b!important;font-size:.78rem!important;margin-top:0!important}
+      .subscription-new-plan input:disabled,.subscription-new-plan select:disabled{background:#f1f5f9!important;color:#94a3b8!important}
+      @media(max-width:1250px){.main .dashboard-kpis{grid-template-columns:repeat(3,minmax(0,1fr))!important}.subscription-new-plan{grid-template-columns:repeat(4,minmax(0,1fr))!important}.subscription-new-plan h3,.subscription-new-plan .trial-plan-help{grid-column:1/-1!important}}
+      @media(max-width:800px){.main{padding-left:12px!important;padding-right:12px!important}.main>.identity-header,.main>.header-divider{margin-left:-12px!important;margin-right:-12px!important}.main>.identity-header{padding-left:16px!important;padding-right:16px!important}.main .dashboard-kpis{grid-template-columns:1fr 1fr!important}.main .premium-donut-chart{width:210px!important;height:210px!important;min-width:210px!important;min-height:210px!important;max-width:210px!important;max-height:210px!important;flex-basis:210px!important}.subscription-new-plan{grid-template-columns:1fr 1fr!important}.subscription-new-plan h3,.subscription-new-plan .trial-plan-help{grid-column:1/-1!important}.subscription-new-plan button{grid-column:1/-1!important}}
+      @media(max-width:520px){.main .dashboard-kpis{grid-template-columns:1fr!important}.subscription-new-plan{grid-template-columns:1fr!important}.subscription-new-plan h3,.subscription-new-plan .trial-plan-help,.subscription-new-plan button{grid-column:auto!important}.platform-owner-auth-shell .auth-brand-copy{display:block!important}.platform-owner-auth-shell .auth-brand-copy p,.platform-owner-auth-shell .auth-brand-copy em{display:block!important;margin-top:4px!important}}
       `}</style>
       <header className="identity-header">
         <section className="apartment-brand">

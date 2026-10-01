@@ -20,6 +20,7 @@ import tempfile
 import smtplib
 import threading
 import contextvars
+import time
 import psycopg
 try:
     from psycopg_pool import ConnectionPool
@@ -33,7 +34,7 @@ except Exception:
 from email.message import EmailMessage
 from pydantic import BaseModel, Field, model_validator
 
-app = FastAPI(title="ApartCare2 API", version="6.5.13-CLEAN-UI-BUILD-1")
+app = FastAPI(title="ApartCare2 API", version="6.5.13-CLEAN-UI-BUILD-2")
 
 
 @app.middleware("http")
@@ -2611,8 +2612,17 @@ def change_own_password(data: ChangePasswordInput, x_apartcare_token: str | None
 @app.post("/admin/auth/logout")
 def admin_logout(x_apartcare_token: str | None = Header(default=None)):
     if x_apartcare_token:
+        user_id=auth_sessions.get(x_apartcare_token)
+        user=next((u for u in admin_users if u.id==user_id),None)
+        if not user and user_id:
+            for users in tenant_users.values():
+                user=next((u for u in users if u.id==user_id),None)
+                if user: break
+        if user:
+            _audit(user.username,"Success","Logout","Property session ended",user.id,getattr(user,"tenant_id",None))
         auth_sessions.pop(x_apartcare_token, None)
         tenant_sessions.pop(x_apartcare_token, None)
+        _save_state()
     return {"logged_out": True}
 
 @app.get("/admin/users", response_model=list[AdminUser])
@@ -2839,6 +2849,12 @@ class SubscriptionPlan(BaseModel):
     currency: str = "INR"
     active: bool = True
     features: dict[str, bool] = Field(default_factory=dict)
+    # Product Owner controlled trial duration for this plan. A plan is a trial
+    # plan only when trial_enabled is explicitly checked; existing paid plans
+    # remain unchanged for backward compatibility.
+    trial_enabled: bool = False
+    trial_value: int = Field(default=0, ge=0, le=36500)
+    trial_unit: Literal["Days", "Months", "Years"] = "Days"
     created_at: str
     updated_at: str
 
@@ -2932,6 +2948,9 @@ class SubscriptionPlanInput(BaseModel):
     currency: str = Field(default="INR", min_length=3, max_length=3)
     active: bool = True
     features: dict[str, bool] = Field(default_factory=dict)
+    trial_enabled: bool = False
+    trial_value: int = Field(default=0, ge=0, le=36500)
+    trial_unit: Literal["Days", "Months", "Years"] = "Days"
 
 class SubscriptionPlanUpdate(BaseModel):
     name: str | None = None
@@ -2940,6 +2959,9 @@ class SubscriptionPlanUpdate(BaseModel):
     annual_price: float | None = Field(default=None, ge=0)
     active: bool | None = None
     features: dict[str, bool] | None = None
+    trial_enabled: bool | None = None
+    trial_value: int | None = Field(default=None, ge=0, le=36500)
+    trial_unit: Literal["Days", "Months", "Years"] | None = None
 
 class SubscriptionTrialExtensionInput(BaseModel):
     value: int = Field(ge=1, le=3650)
@@ -2973,6 +2995,11 @@ def _add_period(start_iso: str, value: int, unit: str) -> str:
     d = date.fromisoformat(start_iso[:10])
     if unit == "Days":
         return (d + timedelta(days=value)).isoformat()
+    if unit == "Years":
+        import calendar
+        year = d.year + value
+        day = min(d.day, calendar.monthrange(year, d.month)[1])
+        return date(year, d.month, day).isoformat()
     # Calendar-month arithmetic: preserve end-of-month semantics.
     month = d.month - 1 + value
     year = d.year + month // 12
@@ -3193,6 +3220,8 @@ def platform_subscription_plans(x_auth_token: str | None = Header(default=None))
 @app.post('/platform/subscription/plans', response_model=SubscriptionPlan, status_code=201)
 def platform_create_subscription_plan(data: SubscriptionPlanInput, x_auth_token: str | None = Header(default=None)):
     actor = _platform_actor(x_auth_token)
+    if data.trial_enabled and data.trial_value < 1:
+        raise HTTPException(status_code=422, detail="Trial Plan duration must be at least 1 Day, Month or Year.")
     if any(p.code.casefold() == data.code.casefold() for p in subscription_plans.values()):
         raise HTTPException(status_code=409, detail="Subscription Plan Code already exists.")
     now = datetime.now().isoformat(timespec="seconds")
@@ -3205,7 +3234,12 @@ def platform_create_subscription_plan(data: SubscriptionPlanInput, x_auth_token:
 def platform_update_subscription_plan(plan_id: str, data: SubscriptionPlanUpdate, x_auth_token: str | None = Header(default=None)):
     actor = _platform_actor(x_auth_token); plan = subscription_plans.get(plan_id)
     if not plan: raise HTTPException(status_code=404, detail="Subscription plan not found.")
-    for k,v in data.model_dump(exclude_none=True).items(): setattr(plan,k,v)
+    incoming=data.model_dump(exclude_none=True)
+    effective_trial=bool(incoming.get("trial_enabled",plan.trial_enabled))
+    effective_value=int(incoming.get("trial_value",plan.trial_value or 0))
+    if effective_trial and effective_value < 1:
+        raise HTTPException(status_code=422, detail="Trial Plan duration must be at least 1 Day, Month or Year.")
+    for k,v in incoming.items(): setattr(plan,k,v)
     plan.updated_at = datetime.now().isoformat(timespec="seconds")
     platform_audit.append({"at":plan.updated_at,"event":"Subscription Plan Updated","actor":actor.username,"detail":plan.code})
     _save_state(); return plan
@@ -3261,8 +3295,37 @@ def platform_assign_plan(tenant_id: str, plan_id: str, x_auth_token: str | None 
     if not account: raise HTTPException(status_code=404, detail="Property account not found.")
     if not sub: raise HTTPException(status_code=404, detail="Subscription not found.")
     if not plan or not plan.active: raise HTTPException(status_code=404, detail="Active subscription plan not found.")
-    old=sub.model_copy(); sub.plan_id=plan.id; sub.subscription_type="PAID"; sub.status="PAST_DUE"; sub.payment_status="PENDING"; sub.start_date=sub.start_date or date.today().isoformat(); sub.last_reason=f"Plan assigned by Product Owner: {plan.name}"; sub.updated_at=datetime.now().isoformat(timespec="seconds")
-    _record_subscription_history(sub,actor.username,"Plan Assigned",sub.last_reason,old=old); platform_audit.append({"at":sub.updated_at,"event":"Subscription Plan Assigned","actor":actor.username,"detail":f"{account.account_id}; {plan.name}"}); _save_state()
+    old=sub.model_copy()
+    now=datetime.now().isoformat(timespec="seconds")
+    sub.plan_id=plan.id
+    if plan.trial_enabled:
+        if plan.trial_value < 1:
+            raise HTTPException(status_code=422, detail="Trial plan duration must be at least 1 unit.")
+        start=date.today().isoformat()
+        sub.subscription_type="TRIAL"
+        sub.status="TRIAL"
+        sub.payment_status="NOT_REQUIRED"
+        sub.trial_start_date=start
+        sub.trial_end_date=_add_period(start,plan.trial_value,plan.trial_unit)
+        sub.start_date=None
+        sub.end_date=None
+        sub.grace_start_date=None
+        sub.grace_end_date=None
+        sub.last_reason=f"Trial plan assigned by Product Owner: {plan.name} ({plan.trial_value} {plan.trial_unit})"
+    else:
+        sub.subscription_type="PAID"
+        sub.status="PAST_DUE"
+        sub.payment_status="PENDING"
+        sub.start_date=sub.start_date or date.today().isoformat()
+        sub.trial_start_date=None
+        sub.trial_end_date=None
+        sub.grace_start_date=None
+        sub.grace_end_date=None
+        sub.last_reason=f"Paid plan assigned by Product Owner: {plan.name}"
+    sub.updated_at=now
+    _record_subscription_history(sub,actor.username,"Trial Plan Assigned" if plan.trial_enabled else "Plan Assigned",sub.last_reason,old=old)
+    platform_audit.append({"at":now,"event":"Trial Plan Assigned" if plan.trial_enabled else "Subscription Plan Assigned","actor":actor.username,"detail":f"{account.account_id}; {plan.name}; {sub.last_reason}"})
+    _save_state()
     return {"subscription":sub,"summary":_subscription_summary(sub)}
 
 @app.post('/platform/accounts/{tenant_id}/subscription/cancel')
@@ -3568,6 +3631,8 @@ def tenant_login(data: AdminLoginInput, account_id: str):
         raise HTTPException(status_code=401, detail="Invalid User ID or password.")
     user.tenant_id=account.tenant_id
     token=secrets.token_urlsafe(32); tenant_sessions[token]=(account.tenant_id,user.id); auth_sessions[token]=user.id
+    _audit(user.username,"Success","Login",f"Tenant {account.account_id}",user.id,account.tenant_id)
+    _save_state()
     return {"user":user,"token":token,"account":account}
 
 
@@ -3709,6 +3774,9 @@ _DB_TABLE_READY = False
 _DB_POOL_LOCK = threading.Lock()
 _LOCAL_DB_VERSION = 0
 _STATE_SAVED_THIS_REQUEST = contextvars.ContextVar('apartcare_state_saved_this_request', default=False)
+_STATE_RUNTIME_INITIALIZED = False
+_STATE_VERSION_CHECK_AT = 0.0
+_STATE_VERSION_CHECK_TTL = 1.0
 
 def _get_db_pool():
     global _DB_POOL
@@ -3723,8 +3791,8 @@ def _get_db_pool():
         if _DB_POOL is None:
             _DB_POOL = ConnectionPool(
                 conninfo=DATABASE_URL,
-                min_size=0,
-                max_size=2,
+                min_size=1,
+                max_size=4,
                 timeout=4,
                 kwargs={'connect_timeout': 3, 'sslmode': 'require'},
             )
@@ -3805,9 +3873,15 @@ def _db_state_version():
         conn.close()
 
 def _refresh_state_if_changed():
-    global _LOCAL_DB_VERSION
+    global _LOCAL_DB_VERSION, _STATE_VERSION_CHECK_AT
     if not DATABASE_URL:
         return
+    now=time.monotonic()
+    # Avoid a Postgres round-trip on every GET. Writes still persist immediately;
+    # another warm Vercel instance is picked up within one second.
+    if now - _STATE_VERSION_CHECK_AT < _STATE_VERSION_CHECK_TTL:
+        return
+    _STATE_VERSION_CHECK_AT=now
     current_version = _db_state_version()
     if current_version != _LOCAL_DB_VERSION:
         _load_state()
@@ -3962,17 +4036,34 @@ def _load_state():
         # requested endpoint is reached. Mutating endpoints persist explicitly.
     except Exception as e: print('ApartCare state load warning:',e)
 
+def _ensure_runtime_state_loaded():
+    """Load cloud state once per warm function and repair legacy subscriptions.
+
+    Older builds loaded the state only after import on Vercel, but also ran the
+    legacy-subscription migration before that state was loaded. Existing tenant
+    accounts could therefore appear in Apartment Accounts but have no row in
+    Subscription & Billing. This one-time bootstrap fixes that gap safely.
+    """
+    global _STATE_RUNTIME_INITIALIZED
+    if _STATE_RUNTIME_INITIALIZED or not os.getenv("VERCEL"):
+        return
+    _load_state()
+    _default_plan_seed()
+    migrated=_migrate_legacy_subscriptions()
+    if migrated:
+        _save_state()
+    _STATE_RUNTIME_INITIALIZED=True
+
 # IMPORTANT: Never load Postgres state during module import on Vercel.
-# Vercel must be able to initialize the function before any database network call.
-# Production state is loaded by load_persistent_state_before_request middleware.
+# Vercel production state is loaded by load_persistent_state_before_request.
 if not os.getenv("VERCEL"):
     _load_state()
     _default_plan_seed()
     _migrate_legacy_subscriptions()
     _save_state()
 else:
+    # Cloud state is loaded lazily on the first request.
     _default_plan_seed()
-    _migrate_legacy_subscriptions()
 
 @app.middleware("http")
 async def enforce_property_tenant_context(request, call_next):
@@ -4095,6 +4186,7 @@ async def load_persistent_state_before_request(request, call_next):
     # low while preserving cross-instance tenant/account consistency.
     if DATABASE_URL:
         try:
+            _ensure_runtime_state_loaded()
             _refresh_state_if_changed()
         except Exception as e:
             print('ApartCare persistent state refresh warning:', e)

@@ -68,7 +68,7 @@ async def app(scope, receive, send):
         await _json_response(send, 200, {
             "status": "ok",
             "version": "6.5.13",
-            "build": "CLEAN_UI_BUILD_1",
+            "build": "CLEAN_UI_BUILD_2",
             "service": "apartcare-fastapi",
             "runtime": "vercel-services",
             "core_loaded": _core_app is not None,
