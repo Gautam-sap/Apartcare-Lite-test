@@ -13,4 +13,7 @@ dependencies = [
 ]
 
 [tool.vercel]
-entrypoint = "main:app"
+# Vercel detects the FastAPI app through api/index.py.
+
+[tool.setuptools]
+packages = ["backend", "backend.app"]
