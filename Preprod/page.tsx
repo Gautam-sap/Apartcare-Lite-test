@@ -204,7 +204,6 @@ export default function Home(){
   const [platformBootstrap,setPlatformBootstrap]=useState({full_name:'Product Owner',username:'',email:'',password:''});
   const [platformAuthView,setPlatformAuthView]=useState<'login'|'forgot'|'reset'>('login');
   const [platformBusy,setPlatformBusy]=useState(false);
-  const [accountBusy,setAccountBusy]=useState(false);
   const [platformForgot,setPlatformForgot]=useState({username:'',email:''});
   const [platformReset,setPlatformReset]=useState({token:'',new_password:'',confirm_password:''});
   const [historicalImport,setHistoricalImport]=useState(false);
@@ -349,13 +348,10 @@ export default function Home(){
   useEffect(()=>{
     (async()=>{
       try{
-        const [accountResponse,platformResponse]=await Promise.all([
-          fetch(`${API}/api/account/status`),
-          fetch(`${API}/api/platform/status`)
-        ]);
-        const status=accountResponse.ok?await accountResponse.json():{initialized:false};
+        const r=await fetch(`${API}/api/account/status`);
+        const status=r.ok?await r.json():{initialized:false};
         setAccountInitialized(!!status.initialized);
-        const ps=platformResponse.ok?await platformResponse.json():({initialized:false});
+        const ps=await fetch(`${API}/api/platform/status`).then(x=>x.ok?x.json():({initialized:false})).catch(()=>({initialized:false}));
         setPlatformInitialized(!!ps.initialized);
         // Remember Account/User is intentionally account-scoped. Do not auto-load a global
         // hint or password before the user identifies the target account.
@@ -542,8 +538,7 @@ export default function Home(){
     setPlatformAccounts(accounts);
     if(accounts.length && !platformRecoveryTenantId){
       setPlatformRecoveryTenantId(accounts[0].tenant_id);
-      // Do not block the Platform Owner console on the secondary user-list request.
-      void loadPlatformRecoveryProperty(token,accounts[0].tenant_id);
+      await loadPlatformRecoveryProperty(token,accounts[0].tenant_id);
     }
   };
   const platformAuditQuery=()=>{const q=new URLSearchParams();if(platformAuditSearch.trim())q.set('q',platformAuditSearch.trim());if(platformAuditAccount.trim())q.set('account_id',platformAuditAccount.trim());if(platformAuditUser.trim())q.set('user_id',platformAuditUser.trim());if(platformAuditEvent)q.set('event_type',platformAuditEvent);if(platformAuditFrom)q.set('from_date',platformAuditFrom);if(platformAuditTo)q.set('to_date',platformAuditTo);return q.toString();};
@@ -567,7 +562,7 @@ export default function Home(){
     const r=await fetch(`${API}/api/platform/subscription/settings`,{method:'PUT',headers:{'Content-Type':'application/json','X-Auth-Token':platformToken},body:JSON.stringify(payload)});
     const d=await r.json().catch(()=>null);
     if(!r.ok){setPlatformSubscriptionMessage(d?.detail||'Unable to save subscription settings.');return;}
-    setPlatformSubscriptionSettings(d);setPlatformSubscriptionMessage('Subscription policy saved. The selected default plan applies to new accounts; Trial is optional and never assigned unless enabled.');await loadPlatformSubscriptions(platformToken);
+    setPlatformSubscriptionSettings(d);setPlatformSubscriptionMessage('Subscription policy saved. Existing accounts keep their current trial expiry; the new default applies to new accounts.');await loadPlatformSubscriptions(platformToken);
   };
   const createPlatformPlan=async(e:React.FormEvent)=>{
     e.preventDefault();
@@ -652,14 +647,9 @@ export default function Home(){
       setPlatformChangeMessage('');
       if(d.email_message) setPlatformMessage(d.email_message);
       setPlatformProperty(null);
-      // Show the Platform Owner console immediately after authentication.
-      // Account/audit/subscription data can hydrate in parallel without making
-      // the login response wait for every secondary API request/cold start.
-      void Promise.all([
-        loadPlatformAccounts(d.token),
-        loadPlatformLoginHistory(d.token),
-        loadPlatformSubscriptions(d.token)
-      ]);
+      await loadPlatformAccounts(d.token);
+      await loadPlatformLoginHistory(d.token);
+      await loadPlatformSubscriptions(d.token);
     }catch(err:any){
       setPlatformMessage(`Unable to contact the ApartCare backend. Please confirm the backend is running on ${API}. ${err?.message||''}`.trim());
     }finally{
@@ -730,33 +720,34 @@ export default function Home(){
     }
   };
   const createApartmentAccount=async(e:React.FormEvent)=>{
-    e.preventDefault();
-    if(accountBusy)return;
-    setLoginError('');
+    e.preventDefault();setLoginError('');clearTenantClientState();
     if(accountForm.password!==accountForm.confirm_password){setLoginError('Password and Confirm Password do not match.');return;}
     const {confirm_password,data_start_month,...payload}=accountForm;
-    setAccountBusy(true);
+    let r: Response;
+    let d:any=null;
     try{
-      const r=await fetch(`${API}/api/account/create`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-      const d=await r.json().catch(()=>null);
-      if(!r.ok){setLoginError(d?.detail||`Unable to create Apartment Account (HTTP ${r.status}).`);return;}
-      const account=d?.account || d;
-      if(!account?.account_id){setLoginError('Apartment Account creation returned an incomplete response. Please check the backend logs.');return;}
-      clearTenantClientState();
-      setAccountId(account.account_id);
-      setActiveApartmentId(account.tenant_id||'demo-apartment');
-      setTenantDataStartMonth(account.data_start_month||'');
-      setAccountInitialized(true);
-      setSettingsForm(prev=>({...prev,tenant_id:account.tenant_id||prev.tenant_id,apartment_id:account.tenant_id||prev.apartment_id,account_id:account.account_id,account_mobile:accountForm.admin_mobile,apartment_name:accountForm.apartment_name,address:accountForm.address,city:accountForm.city,state:accountForm.state,pin_code:accountForm.pin_code,country:accountForm.country,language:accountForm.language}));
-      setLoginForm({account_id:account.account_id,username:accountForm.admin_username||accountForm.admin_email,password:''});
-      setAccountForm(newApartmentAccountForm());
-      setAuthMode('login');
-      setLoginError(`Apartment created successfully. Account Number: ${account.account_id}. ${d?.email_message||''}`.trim());
+      r=await fetch(`${API}/api/account/create`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+      d=await r.json().catch(()=>null);
     }catch(err:any){
-      setLoginError(`Unable to contact the ApartCare backend. Please confirm the backend is running. ${err?.message||''}`.trim());
-    }finally{
-      setAccountBusy(false);
+      setLoginError(`Unable to contact the ApartCare backend. Please verify the Vercel API deployment and environment configuration. ${err?.message||''}`.trim());
+      return;
     }
+    if(!r.ok){
+      if(r.status===503 && String(d?.detail||'').toLowerCase().includes('production persistence')){
+        setLoginError('Apartment Account creation is currently disabled because Production persistence is not configured. Connect a Postgres DATABASE_URL to this Vercel project, redeploy, and try again.');
+      }else{
+        setLoginError(d?.detail||`Unable to create Apartment Account (HTTP ${r.status}).`);
+      }
+      return;
+    }
+    const account=d?.account;
+    if(account?.account_id){setAccountId(account.account_id);setActiveApartmentId(account.tenant_id||'demo-apartment');setTenantDataStartMonth(account.data_start_month||'');}
+    setAccountInitialized(true);
+    setSettingsForm(prev=>({...prev,tenant_id:account?.tenant_id||prev.tenant_id,apartment_id:account?.tenant_id||prev.apartment_id,account_id:account?.account_id||'',account_mobile:accountForm.admin_mobile,apartment_name:accountForm.apartment_name,address:accountForm.address,city:accountForm.city,state:accountForm.state,pin_code:accountForm.pin_code,country:accountForm.country,language:accountForm.language}));
+    setLoginForm({account_id:account?.account_id||'',username:accountForm.admin_username||accountForm.admin_email,password:''});
+    setAccountForm(newApartmentAccountForm());
+    setAuthMode('login');
+    setLoginError(`Apartment created successfully. Account Number: ${account?.account_id||'generated'}. ${d?.email_message||''}`.trim());
   };
   const clearTenantClientState=()=>{
     setActiveApartmentId('');setAccountId('');setTenantDataStartMonth('');setTenantSubscription(null);setTenantSubscriptionMessage('');
@@ -765,7 +756,7 @@ export default function Home(){
     setExpenses([]);setExpenseSummary(null);setExpensePaymentSummary(null);setExpenseHistory([]);setExpenseLockHistory([]);setAllFlatsReport(null);setYearlyCollectionReport(null);setYearlyExpense(null);setFlatStatement(null);setIndividualMaintenance([]);setReportFlats([]);setLoginHistory([]);setAdminUsers([]);setResidentHistory([]);setPaymentLockHistory([]);setPaymentLock(null);setPaymentForms({});setSelectedMaintenanceIds([]);setSelectedPaymentFlats([]);setEditingResidentId(null);setEditingExpenseId(null);setEditingWatchmanId(null);setEditingUtilityId(null);
     setSettingsMessage('');setUtilityMessage('');setExpenseMessage('');setPaymentMessage('');setResidentMessage('');setMaintenanceMessage('');setReportMessage('');setAdminMessage('');
   };
-  const logoutApartCare=async()=>{try{if(authToken)await fetch(`${API}/api/admin/auth/logout`,{method:'POST',headers:{'X-ApartCare-Token':authToken}});}finally{window.localStorage.removeItem('apartcare_session');clearTenantClientState();setMustChangePassword(false);setCurrentUser(null);setAuthToken('');setUtilityEditReady(false);setLoginError('');setAuthMode('login');}};
+  const logoutApartCare=async()=>{try{if(authToken)await fetch(`${API}/api/admin/auth/logout`,{method:'POST',headers:{'X-ApartCare-Token':authToken}});}finally{window.localStorage.removeItem('apartcare_session');clearTenantClientState();setCurrentUser(null);setAuthToken('');setUtilityEditReady(false);setLoginError('');setAuthMode('login');}};
   useEffect(()=>{
     const raw=typeof window!=='undefined'?window.localStorage.getItem('apartcare_session'):null;
     if(!raw)return;
@@ -1656,27 +1647,8 @@ export default function Home(){
       .platform-owner-auth-shell .password-modal-brand-copy span{font-size:13px!important;font-weight:700!important;color:#315f96!important}
       .platform-owner-auth-shell .password-modal-brand-copy em{font-size:12px!important;color:#0f8a5f!important;font-style:italic!important;font-weight:700!important}
 
-      .platform-owner-auth-shell{min-height:100vh!important;padding:28px!important;background:linear-gradient(135deg,#0f2742 0%,#173b60 42%,#eef4fb 42%,#f6f9fd 100%)!important;align-items:flex-start!important}
-      /* V6.5.13 ALIGNMENT FIX 5 — prevent platform auth horizontal overflow at desktop widths.
-         The auth card width must include its padding; the viewport must never be wider than the page. */
-      html,body{width:100%!important;max-width:100%!important;margin:0!important;padding:0!important;overflow-x:hidden!important}
-      .platform-owner-auth-shell{width:100%!important;max-width:100%!important;box-sizing:border-box!important;overflow-x:hidden!important}
-      .platform-owner-auth-shell .auth-card,.platform-owner-auth-shell .platform-owner-console{box-sizing:border-box!important;width:100%!important;max-width:1040px!important;min-width:0!important}
-      .platform-owner-auth-shell .auth-brand{display:flex!important;flex-direction:row!important;align-items:center!important;justify-content:flex-start!important;gap:20px!important;width:100%!important;min-width:0!important;box-sizing:border-box!important;padding:0 0 22px!important;margin:0 0 22px!important;border-bottom:1px solid #dbe4ef!important}
-      .platform-owner-auth-shell .auth-logo{width:108px!important;height:76px!important;display:flex!important;align-items:center!important;justify-content:center!important;flex:0 0 108px!important;border-radius:14px!important;background:#fff!important;border:1px solid #dbe4ef!important;overflow:hidden!important;box-shadow:0 6px 18px rgba(23,43,77,.08)!important;padding:4px!important}
-      .platform-owner-auth-shell .auth-logo img{display:block!important;width:100%!important;height:100%!important;max-width:100%!important;max-height:100%!important;object-fit:contain!important}
-      .platform-owner-auth-shell .auth-brand-copy{min-width:0!important;display:flex!important;flex-direction:column!important;gap:3px!important}
-      .platform-owner-auth-shell .auth-brand-copy h1{margin:0 0 3px!important;font-size:32px!important;line-height:1.1!important;color:#172b4d!important;font-weight:850!important;letter-spacing:-.03em!important}
-      .platform-owner-auth-shell .auth-brand-copy p{margin:0!important;font-size:16px!important;color:#315f96!important;font-weight:750!important}
-      .platform-owner-auth-shell .auth-brand-copy em{margin:0!important;font-style:normal!important;color:#0f8a5f!important;font-weight:650!important}
-      .platform-owner-auth-shell .auth-brand>div:last-child{min-width:0!important}
-      .platform-owner-auth-shell .auth-brand h1,.platform-owner-auth-shell .auth-brand p,.platform-owner-auth-shell .auth-brand em{overflow-wrap:anywhere!important}
-      .platform-owner-auth-shell .auth-form{box-sizing:border-box!important;width:100%!important;min-width:0!important}
-      .platform-owner-auth-shell .auth-form .password-field{box-sizing:border-box!important;min-width:0!important;width:100%!important}
-      .platform-owner-auth-shell .auth-form .password-toggle{height:46px!important;min-height:46px!important;max-height:46px!important;display:flex!important;align-items:center!important;justify-content:center!important;box-sizing:border-box!important;border:1px solid #c8d7e7!important;border-radius:11px!important;background:#edf4ff!important;color:#172b4d!important;font-size:18px!important;line-height:1!important;padding:0!important;cursor:pointer!important;box-shadow:0 2px 6px rgba(23,43,77,.06)!important}
-      .platform-owner-auth-shell .auth-form .password-toggle:hover{background:#e2edff!important;border-color:#9dbbe8!important}
-      @media(max-width:1200px){.dashboard-kpis{grid-template-columns:repeat(3,minmax(0,1fr))!important}}@media(max-width:700px){.dashboard-kpis{grid-template-columns:repeat(2,minmax(0,1fr))!important}}@media(max-width:460px){.dashboard-kpis{grid-template-columns:1fr!important}}@media(max-width:760px){.platform-owner-auth-shell{padding:14px!important}.platform-owner-auth-shell .auth-card{width:100%!important;max-width:none!important}.platform-owner-auth-shell .auth-brand{gap:14px!important}.platform-owner-auth-shell .auth-form{padding:16px!important}}.platform-owner-auth-shell .platform-owner-console{margin:0 auto!important;overflow:hidden!important;border:1px solid #d5e2ef!important;border-radius:24px!important;background:rgba(255,255,255,.96)!important;box-shadow:0 24px 60px rgba(15,39,66,.22)!important}.platform-owner-auth-shell .platform-auth-heading{display:flex;align-items:center;gap:16px;margin:-28px -28px 24px;padding:22px 28px;background:linear-gradient(135deg,#102b4d,#1f4d78);color:#fff;border-bottom:4px solid #4e86d9}.platform-owner-auth-shell .platform-auth-heading img{width:64px;height:64px;object-fit:contain;background:#fff;border-radius:16px;padding:6px}.platform-owner-auth-shell .platform-auth-heading h2{margin:0;color:#fff!important;font-size:1.65rem!important}.platform-owner-auth-shell .platform-auth-heading p{margin:3px 0 0;color:#dbeafe;font-size:.9rem}.platform-owner-auth-shell .auth-form{padding:20px!important;border:1px solid #d8e3ee!important;border-radius:18px!important;background:linear-gradient(145deg,#fbfdff,#f4f8fc)!important;box-shadow:0 12px 28px rgba(38,56,78,.07)!important}.platform-owner-auth-shell .auth-form label{gap:7px!important;color:#334e6f!important;font-weight:800!important}.platform-owner-auth-shell .auth-form input{min-height:46px!important;border:1px solid #c8d7e7!important;border-radius:11px!important;background:#fff!important;box-shadow:inset 0 1px 2px rgba(15,23,42,.03)!important}.platform-owner-auth-shell .auth-form input:focus{border-color:#4e86d9!important;box-shadow:0 0 0 3px rgba(78,134,217,.14)!important;outline:none!important}.platform-owner-auth-shell .auth-primary-button{min-height:44px!important}.platform-owner-auth-shell .auth-secondary-button,.platform-owner-auth-shell .auth-back-button{margin-top:10px!important}
-      .platform-owner-auth-shell .auth-form{max-width:880px!important;margin:0 auto!important;grid-template-columns:minmax(0,1fr) minmax(280px,360px)!important;gap:18px!important}
+      .platform-owner-auth-shell{min-height:100vh!important;padding:28px!important;background:linear-gradient(135deg,#0f2742 0%,#173b60 42%,#eef4fb 42%,#f6f9fd 100%)!important;align-items:flex-start!important}.platform-owner-auth-shell .platform-owner-console{margin:0 auto!important;overflow:hidden!important;border:1px solid #d5e2ef!important;border-radius:24px!important;background:rgba(255,255,255,.96)!important;box-shadow:0 24px 60px rgba(15,39,66,.22)!important}.platform-owner-auth-shell .platform-auth-heading{display:flex;align-items:center;gap:16px;margin:-28px -28px 24px;padding:22px 28px;background:linear-gradient(135deg,#102b4d,#1f4d78);color:#fff;border-bottom:4px solid #4e86d9}.platform-owner-auth-shell .platform-auth-heading img{width:64px;height:64px;object-fit:contain;background:#fff;border-radius:16px;padding:6px}.platform-owner-auth-shell .platform-auth-heading h2{margin:0;color:#fff!important;font-size:1.65rem!important}.platform-owner-auth-shell .platform-auth-heading p{margin:3px 0 0;color:#dbeafe;font-size:.9rem}.platform-owner-auth-shell .auth-brand em{display:block!important;margin-top:4px!important;color:#0f8a5f!important;font-style:italic!important;font-weight:700!important}.platform-owner-auth-shell .auth-form{padding:20px!important;border:1px solid #d8e3ee!important;border-radius:18px!important;background:linear-gradient(145deg,#fbfdff,#f4f8fc)!important;box-shadow:0 12px 28px rgba(38,56,78,.07)!important}.platform-owner-auth-shell .auth-form label{gap:7px!important;color:#334e6f!important;font-weight:800!important}.platform-owner-auth-shell .auth-form input{min-height:46px!important;border:1px solid #c8d7e7!important;border-radius:11px!important;background:#fff!important;box-shadow:inset 0 1px 2px rgba(15,23,42,.03)!important}.platform-owner-auth-shell .auth-form input:focus{border-color:#4e86d9!important;box-shadow:0 0 0 3px rgba(78,134,217,.14)!important;outline:none!important}.platform-owner-auth-shell .auth-primary-button{min-height:44px!important}.platform-owner-auth-shell .auth-secondary-button,.platform-owner-auth-shell .auth-back-button{margin-top:10px!important}
+      .platform-owner-auth-shell .auth-form{max-width:880px!important;margin:0 auto!important;grid-template-columns:minmax(0,1fr) minmax(280px,360px)!important;gap:18px!important}.platform-owner-auth-shell .auth-form .password-form-field{align-self:start!important}.platform-owner-auth-shell .auth-form .password-helper{display:block!important;min-height:2.7em!important;line-height:1.35!important;color:#64748b!important;font-weight:650!important}.platform-owner-auth-shell .auth-form .password-helper-empty{visibility:hidden!important}
       .platform-owner-auth-shell .auth-form input{max-width:100%!important;box-sizing:border-box!important}
       .platform-owner-auth-shell .auth-form .form-actions{grid-column:1/-1!important}
       .platform-owner-auth-shell .auth-form .password-field{display:grid!important;grid-template-columns:minmax(0,1fr) 48px!important;gap:8px!important}
@@ -1707,7 +1679,7 @@ export default function Home(){
       .panel,.form-panel,.table-panel,.period-panel,.water-box{border:1px solid var(--line);box-shadow:0 10px 26px rgba(51,65,85,.06);border-radius:16px;background:rgba(255,255,255,.92)}
       button,.button-link{border-radius:10px!important;transition:transform .18s ease,box-shadow .18s ease,filter .18s ease!important;box-shadow:0 5px 14px rgba(59,104,184,.14)} button:hover:not(:disabled),.button-link:hover{transform:translateY(-2px);filter:brightness(1.03);box-shadow:0 9px 20px rgba(59,104,184,.20)}
       .sidebar button{border-radius:10px!important;margin:3px 6px;width:calc(100% - 12px);text-align:left}.sidebar button.active{background:linear-gradient(90deg,#3d67b4,#527bc8)!important;color:#fff;box-shadow:0 8px 18px rgba(26,53,104,.35)}
-      .premium-kpis{gap:20px}.dashboard-kpis{display:grid!important;grid-template-columns:repeat(6,minmax(0,1fr))!important;gap:14px!important;align-items:stretch!important}.dashboard-kpis .kpi-card{min-width:0!important}.kpi-card{position:relative;overflow:hidden;min-height:128px;border-left:5px solid var(--accent);background:linear-gradient(135deg,var(--soft),#fff)!important;box-shadow:0 10px 24px rgba(51,65,85,.10)}.kpi-card .value{font-size:2.05rem;font-weight:800;color:#344054;position:relative;z-index:2}.kpi-card .label{position:relative;z-index:2;font-weight:700}.kpi-glow{position:absolute;width:110px;height:110px;border-radius:50%;right:-35px;bottom:-45px;background:var(--accent);opacity:.10}.kpi-1{--accent:#6b4e9b;--soft:#f3effa}.kpi-2{--accent:#19726a;--soft:#edf8f6}.kpi-3{--accent:#315f96;--soft:#eef4fb}.kpi-4{--accent:#b47712;--soft:#fff7e8}.kpi-5{--accent:#2e7d4e;--soft:#eef9f1}.kpi-6{--accent:#7b5ea7;--soft:#f5f1fb}
+      .premium-kpis{gap:20px}.kpi-card{position:relative;overflow:hidden;min-height:128px;border-left:5px solid var(--accent);background:linear-gradient(135deg,var(--soft),#fff)!important;box-shadow:0 10px 24px rgba(51,65,85,.10)}.kpi-card .value{font-size:2.05rem;font-weight:800;color:#344054;position:relative;z-index:2}.kpi-card .label{position:relative;z-index:2;font-weight:700}.kpi-glow{position:absolute;width:110px;height:110px;border-radius:50%;right:-35px;bottom:-45px;background:var(--accent);opacity:.10}.kpi-1{--accent:#6b4e9b;--soft:#f3effa}.kpi-2{--accent:#19726a;--soft:#edf8f6}.kpi-3{--accent:#315f96;--soft:#eef4fb}.kpi-4{--accent:#b47712;--soft:#fff7e8}.kpi-5{--accent:#2e7d4e;--soft:#eef9f1}.kpi-6{--accent:#7b5ea7;--soft:#f5f1fb}
       .two-donuts{grid-template-columns:repeat(2,minmax(0,1fr));gap:26px}.premium-donut-panel{min-height:470px;padding:26px}.premium-donut-panel h2{margin:0 0 16px}.premium-donut-row{display:flex;align-items:center;justify-content:center;gap:38px;min-height:380px}.premium-donut-chart{width:330px;height:330px;border-radius:50%;position:relative;box-shadow:inset 0 0 0 1px rgba(255,255,255,.6)}.premium-hole{position:absolute;inset:88px;border-radius:50%;background:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;box-shadow:0 2px 18px rgba(15,23,42,.08)}.premium-hole strong{font-size:1.35rem}.premium-hole span{font-size:.85rem;color:#64748b;margin-top:5px}.premium-legend{display:grid;gap:13px;min-width:170px}.premium-legend div{display:grid;grid-template-columns:14px 1fr auto;align-items:center;gap:9px}.premium-legend span{width:14px;height:14px;border-radius:3px}.premium-legend b{font-weight:600}.premium-legend small{color:#64748b;font-weight:700}
       .auth-widget,.auth-card,.platform-card{box-shadow:0 14px 34px rgba(51,65,85,.12)}
       /* V6.2.1 — Global ApartCare action-button standard: primary actions match Login */
@@ -1995,28 +1967,6 @@ export default function Home(){
   .platform-owner-auth-shell .auth-form{grid-template-columns:1fr!important;gap:16px!important;padding:18px!important}
   .platform-owner-auth-shell .auth-form .form-actions{grid-column:1!important}
 }
-/* V6.5.13 UI ALIGNMENT FIX 4 — password/help rows and client-trial polish */
-.platform-owner-auth-shell .auth-form .password-form-field{align-self:start!important}
-.platform-owner-auth-shell .auth-form .password-form-field .field-label{display:block!important;line-height:1.25!important;min-height:20px!important}
-.platform-owner-auth-shell .auth-form .password-form-field .password-help,
-.platform-owner-auth-shell .auth-form .password-form-field .password-help-spacer{display:block!important;grid-column:auto!important;line-height:1.5!important;min-height:48px!important;margin:0!important}
-.platform-owner-auth-shell .auth-form .password-form-field .password-help-spacer{visibility:hidden!important;user-select:none!important}
-.platform-owner-auth-shell .auth-form .password-form-field .password-field{margin-top:0!important}
-.platform-owner-auth-shell .auth-form .password-form-field .password-toggle{align-self:stretch!important;height:auto!important}
-/* Keep paired two-column fields visually balanced when one field has helper copy. */
-.auth-form .password-form-field{align-self:start!important}
-@media(max-width:760px){
-  .platform-owner-auth-shell .auth-form .password-form-field .password-help,
-  .platform-owner-auth-shell .auth-form .password-form-field .password-help-spacer{min-height:0!important}
-  .platform-owner-auth-shell .auth-form .confirm-password-field .password-help-spacer{display:none!important}
-}
-/* Global trial-quality form normalization: no control may overflow its grid cell. */
-.main .resident-form,.main .utility-form,.main .golive-form,.main .professional-expense-form,.main .subscription-settings-form,.main .audit-filter-grid{box-sizing:border-box!important}
-.main .resident-form>label,.main .utility-form>label,.main .golive-form>label,.main .professional-expense-form>label{min-width:0!important;box-sizing:border-box!important}
-.main .resident-form input,.main .resident-form select,.main .resident-form textarea,.main .utility-form input,.main .utility-form select,.main .utility-form textarea,.main .golive-form input,.main .golive-form select,.main .golive-form textarea,.main .professional-expense-form input,.main .professional-expense-form select,.main .professional-expense-form textarea{max-width:100%!important;min-width:0!important;box-sizing:border-box!important}
-.main .table-scroll{max-width:100%!important;overflow-x:auto!important}
-.main table{max-width:100%!important}
-.main button{box-sizing:border-box!important}
 /* ApartCare UI 1.0 — uniform visual system for every module */
 :root{
   --ac-primary:#2563eb;
@@ -2240,7 +2190,7 @@ button{cursor:pointer}
       @media(max-width:900px){.platform-owner-auth-shell .platform-recovery-toolbar{grid-template-columns:1fr 1fr!important}.platform-owner-auth-shell .platform-recovery-toolbar button{grid-column:1/-1!important;width:max-content!important}.platform-owner-auth-shell .platform-recovery-summary{grid-template-columns:repeat(2,minmax(0,1fr))!important}}
       @media(max-width:600px){.platform-owner-auth-shell .platform-recovery-panel{padding:16px!important}.platform-owner-auth-shell .recovery-page-hero{align-items:flex-start!important;flex-wrap:wrap!important}.platform-owner-auth-shell .platform-recovery-toolbar{grid-template-columns:1fr!important}.platform-owner-auth-shell .platform-recovery-toolbar button{grid-column:auto!important;width:100%!important}.platform-owner-auth-shell .platform-recovery-summary{grid-template-columns:1fr!important}.platform-owner-auth-shell .platform-recovery-user-toolbar{grid-template-columns:1fr!important}}
 `}</style>
-        <div className="auth-brand"><div className="auth-logo"><img src="/apartcare-lite-logo.png" alt="ApartCare Lite"/></div><div className="auth-brand-copy"><h1>ApartCare Lite Platform</h1><p>Product Owner Administration</p><em>Tenant recovery, account oversight and controlled security actions.</em></div></div>
+        <div className="auth-brand"><div className="auth-logo">🛡️</div><div><h1>ApartCare Lite Platform</h1><p>Product Owner Administration</p><em>Tenant recovery, account oversight and controlled security actions.</em></div></div>
         {platformUser?<>
       {platformMustChangePassword&&<div className="modal-backdrop"><section className="password-modal password-modal-branded"><div className="password-modal-brand"><img className="po-brand-image" src="/apartcare-lite-logo.png" alt="ApartCare Lite"/><div className="password-modal-brand-copy"><strong>ApartCare Lite</strong><span>Your daily partner in property care.</span><em>Helping you run your building beautifully.</em></div></div><div className="modal-icon">🔐</div><h2>Change your Platform Owner password</h2><p>For security, the Platform Owner must set a new password before continuing. This requirement remains active until the password is changed.</p>{platformChangeMessage&&<div className="message">{platformChangeMessage}</div>}<form onSubmit={changePlatformPassword}><label>New Password<div className="password-field"><input required minLength={8} type={showPassword?'text':'password'} value={platformChangeForm.new_password} onChange={e=>setPlatformChangeForm({...platformChangeForm,new_password:e.target.value})}/><button type="button" className="password-toggle" onClick={()=>setShowPassword(!showPassword)}>{showPassword?'🙈':'👁️'}</button></div></label><label>Confirm New Password<div className="password-field"><input required minLength={8} type={showConfirmPassword?'text':'password'} value={platformChangeForm.confirm_password} onChange={e=>setPlatformChangeForm({...platformChangeForm,confirm_password:e.target.value})}/><button type="button" className="password-toggle" onClick={()=>setShowConfirmPassword(!showConfirmPassword)}>{showConfirmPassword?'🙈':'👁️'}</button></div></label><div className="form-actions"><button type="submit" className="auth-primary-button" disabled={platformBusy}>{platformBusy?'Updating Password…':'Update Password & Continue'}</button></div></form></section></div>}
           <header className="po-top-header">
@@ -2274,13 +2224,13 @@ button{cursor:pointer}
             {platformSubscriptionMessage&&<div className="message subscription-message">{platformSubscriptionMessage}</div>}
             {platformSubscriptionSettings&&<>
               <div className="subscription-policy-grid">
-                <div className="subscription-policy-card"><span>Free / Trial</span><strong>{platformSubscriptionSettings.trial_enabled?'Enabled':'Disabled'}</strong><small>Optional — only when explicitly enabled by the Product Owner</small></div>
+                <div className="subscription-policy-card"><span>Free / Trial</span><strong>{platformSubscriptionSettings.trial_enabled?'Enabled':'Disabled'}</strong><small>Applied only to new Apartment Accounts</small></div>
                 <div className="subscription-policy-card"><span>Default Trial</span><strong>{platformSubscriptionSettings.default_trial_value} {platformSubscriptionSettings.default_trial_unit}</strong><small>Starts from Account Creation Date</small></div>
                 <div className="subscription-policy-card"><span>Grace Period</span><strong>{platformSubscriptionSettings.default_grace_value} {platformSubscriptionSettings.default_grace_unit}</strong><small>After trial expiry / payment issue</small></div>
                 <div className="subscription-policy-card"><span>Complimentary</span><strong>{platformSubscriptionSettings.allow_complimentary?'Allowed':'Disabled'}</strong><small>Product Owner controlled</small></div>
               </div>
               <div className="subscription-settings-form">
-                <label className="checkbox-inline"><input type="checkbox" checked={Boolean(platformSubscriptionSettings.trial_enabled)} onChange={e=>setPlatformSubscriptionSettings({...platformSubscriptionSettings,trial_enabled:e.target.checked})}/> Enable Trial for new accounts (optional)</label><label>Default Plan for New Accounts<select value={platformSubscriptionSettings.default_plan_id||''} onChange={e=>setPlatformSubscriptionSettings({...platformSubscriptionSettings,default_plan_id:e.target.value})}><option value="">Select Default Plan</option>{platformPlans.filter((p:any)=>p.active).map((p:any)=><option key={p.id} value={p.id}>{p.name} — ₹{Number(p.monthly_price).toLocaleString('en-IN')}/mo</option>)}</select><small className="help-text">New accounts inherit this plan unless the Product Owner assigns another plan.</small></label>
+                <label className="checkbox-inline"><input type="checkbox" checked={Boolean(platformSubscriptionSettings.trial_enabled)} onChange={e=>setPlatformSubscriptionSettings({...platformSubscriptionSettings,trial_enabled:e.target.checked})}/> Enable Trial for new accounts</label>
                 <label>Trial Duration<input type="number" min="1" value={platformSubscriptionSettings.default_trial_value===0?'':platformSubscriptionSettings.default_trial_value} onChange={e=>setPlatformSubscriptionSettings({...platformSubscriptionSettings,default_trial_value:e.target.value===''?0:Number(e.target.value)})}/></label>
                 <label>Unit<select value={platformSubscriptionSettings.default_trial_unit} onChange={e=>setPlatformSubscriptionSettings({...platformSubscriptionSettings,default_trial_unit:e.target.value})}><option>Days</option><option>Months</option></select></label>
                 <label>Grace Period<input type="number" min="0" value={platformSubscriptionSettings.default_grace_value===0?'':platformSubscriptionSettings.default_grace_value} onChange={e=>setPlatformSubscriptionSettings({...platformSubscriptionSettings,default_grace_value:e.target.value===''?0:Number(e.target.value)})}/></label>
@@ -2331,12 +2281,12 @@ button{cursor:pointer}
                 </label>
                 <button type="button" className="secondary" onClick={()=>setPlatformRecoveryUserSearch('')}>Clear Search</button>
               </div>
-              <div className="table-scroll business-grid"><table><thead><tr><th>User ID</th><th>Name</th><th>Apartment</th><th>Role</th><th>Email</th><th>Mobile</th><th>Status</th><th>Last Activity</th><th>History</th><th>Actions</th></tr></thead><tbody>{(()=>{const q=platformRecoveryUserSearch.trim().toLowerCase();const users=(platformRecoveryProperty.users||[]).filter((u:any)=>!q||[u.username,u.full_name,u.role,u.email,u.mobile_no,u.active?'Active':'Inactive',u.locked?'Locked':'Open'].some((v:any)=>String(v||'').toLowerCase().includes(q)));return users.length===0?<tr><td colSpan={10} className="empty">{q?'No matching tenant users found.':'No users available for this apartment.'}</td></tr>:users.map((u:any)=><tr key={u.id}>{(()=>{const tid=platformRecoveryProperty.tenant_id==='ALL'?u._tenant_id:platformRecoveryProperty.tenant_id;const hist=(platformLoginHistory||[]).filter((h:any)=>String(h.username||'').toLowerCase()===String(u.username||'').toLowerCase() && (!tid || !h.tenant_id || h.tenant_id===tid));const last=hist[0];return <><td><b>{u.username}</b></td><td>{u.full_name}</td><td>{platformRecoveryProperty.tenant_id==='ALL'?(u._apartment_name||'—'):(platformRecoveryProperty.apartment_name||'—')}</td><td>{u.role}</td><td>{u.email||'—'}</td><td>{u.mobile_no||'—'}</td><td>{u.active?'Active':'Inactive'}{u.locked&&<small>Locked</small>}</td><td>{last?formatDateTime(last.at):'No history'}</td><td><b>{hist.length}</b> event{hist.length===1?'':'s'}</td><td><button type="button" className="secondary" onClick={()=>platformResetUser(u.id,tid)}>Reset Password</button>{u.locked&&<button type="button" className="secondary" onClick={()=>platformUnlock(u.id,tid)}>Unlock / Activate</button>}</td></>})()}</tr>)})()}</tbody></table></div>
+              <div className="table-scroll business-grid"><table><thead><tr><th>User ID</th><th>Name</th><th>Role</th><th>Email</th><th>Mobile</th><th>Status</th><th>Lock</th><th>Actions</th></tr></thead><tbody>{(()=>{const q=platformRecoveryUserSearch.trim().toLowerCase();const users=(platformRecoveryProperty.users||[]).filter((u:any)=>!q||[u.username,u.full_name,u.role,u.email,u.mobile_no,u.active?'Active':'Inactive',u.locked?'Locked':'Open'].some((v:any)=>String(v||'').toLowerCase().includes(q)));return users.length===0?<tr><td colSpan={8} className="empty">{q?'No matching tenant users found.':'No users available for this apartment.'}</td></tr>:users.map((u:any)=><tr key={u.id}><td><b>{u.username}</b>{platformRecoveryProperty.tenant_id==='ALL'&&<small>{u._account_id||'—'}</small>}</td><td>{u.full_name}{platformRecoveryProperty.tenant_id==='ALL'&&<small>{u._apartment_name||'—'}</small>}</td><td>{u.role}</td><td>{u.email||'—'}</td><td>{u.mobile_no||'—'}</td><td>{u.active?'Active':'Inactive'}</td><td>{u.locked?'Locked':'Open'}</td><td><button type="button" className="secondary" onClick={()=>platformResetUser(u.id,platformRecoveryProperty.tenant_id==='ALL'?u._tenant_id:platformRecoveryProperty.tenant_id)}>Reset Password</button>{u.locked&&<button type="button" className="secondary" onClick={()=>platformUnlock(u.id,platformRecoveryProperty.tenant_id==='ALL'?u._tenant_id:platformRecoveryProperty.tenant_id)}>Unlock / Activate</button>}</td></tr>)})()}</tbody></table></div>
             </>:<div className="empty">Select an Apartment Account above. The selected tenant's Admins and users will be shown here for controlled password recovery.</div>}
           </section>}
           <div className="form-actions platform-logout-row"><button type="button" className="auth-secondary-button" onClick={platformLogout}>🔒 Logout Platform Owner</button></div>
         </>:<>
-          {platformAuthView==='forgot'?<><h2>Forgot Platform Password</h2><p className="subtitle">Enter your Platform Owner User ID and registered recovery email. A one-time reset code will be emailed to you.</p><form className="resident-form auth-form" onSubmit={requestPlatformPasswordReset}><label>Platform User ID<input required value={platformForgot.username} onChange={e=>setPlatformForgot({...platformForgot,username:e.target.value})}/></label><label>Registered Recovery Email<input required type="email" value={platformForgot.email} onChange={e=>setPlatformForgot({...platformForgot,email:e.target.value})}/></label><div className="form-actions"><button type="submit" className="auth-primary-button">📧 Send Platform Reset Email</button></div></form><button type="button" className="auth-back-button" onClick={()=>{resetPlatformAuthState();setAuthMode('platform')}}>← Back to Platform Owner Login</button></>:platformAuthView==='reset'?<><h2>Reset Platform Password</h2><p className="subtitle">Enter the one-time code received by email and create a new Platform Owner password.</p><form className="resident-form auth-form" onSubmit={confirmPlatformPasswordReset}><label>Reset Code<input required value={platformReset.token} onChange={e=>setPlatformReset({...platformReset,token:e.target.value})}/></label><label>New Password<div className="password-field"><input required minLength={8} type={showPassword?'text':'password'} value={platformReset.new_password} onChange={e=>setPlatformReset({...platformReset,new_password:e.target.value})}/><button type="button" className="password-toggle eye-toggle" onClick={()=>setShowPassword(!showPassword)}>{eye(showPassword)}</button></div></label><label>Confirm Initial Password<div className="password-field"><input required minLength={8} type={showConfirmPassword?'text':'password'} value={platformReset.confirm_password} onChange={e=>setPlatformReset({...platformReset,confirm_password:e.target.value})}/><button type="button" className="password-toggle eye-toggle" onClick={()=>setShowConfirmPassword(!showConfirmPassword)}>{eye(showConfirmPassword)}</button></div></label><div className="form-actions"><button type="submit" className="auth-primary-button">🔐 Reset Platform Password</button></div></form><div className="auth-navigation"><button type="button" className="auth-back-button" onClick={()=>{resetPlatformAuthState();setAuthMode('platform')}}>← Back to Platform Owner Login</button></div></>:<><div className="platform-auth-heading"><div className="platform-brand-icon" aria-hidden="true">🛡️</div><div><h2>{platformInitialized?'Platform Owner Login':'Set Up Platform Owner'}</h2><p>Secure Product Owner access and controlled platform administration.</p></div></div><form key={platformAuthFormKey} autoComplete="off" className="resident-form auth-form" onSubmit={platformSignIn}>{!platformInitialized&&<label>Full Name<input required value={platformBootstrap.full_name} onChange={e=>setPlatformBootstrap({...platformBootstrap,full_name:e.target.value})}/></label>}{!platformInitialized&&<label>Recovery Email<input required type="email" value={platformBootstrap.email} onChange={e=>setPlatformBootstrap({...platformBootstrap,email:e.target.value})}/></label>}<label>{platformInitialized?'Platform Owner User ID / Recovery Email':'Platform Owner User ID'}<input autoComplete="off" autoCapitalize="none" readOnly name={`platform-owner-user-id-${platformAuthFormKey}`} onFocus={e=>e.currentTarget.removeAttribute('readonly')} required value={platformInitialized?platformLogin.username:platformBootstrap.username} onChange={e=>platformInitialized?setPlatformLogin({...platformLogin,username:e.target.value}):setPlatformBootstrap({...platformBootstrap,username:e.target.value})}/></label><label>Password<div className="password-field"><input autoComplete="new-password" readOnly name={`platform-owner-password-${platformAuthFormKey}`} onFocus={e=>e.currentTarget.removeAttribute('readonly')} required minLength={8} type={showPassword?'text':'password'} value={platformInitialized?platformLogin.password:platformBootstrap.password} onChange={e=>platformInitialized?setPlatformLogin({...platformLogin,password:e.target.value}):setPlatformBootstrap({...platformBootstrap,password:e.target.value})}/><button type="button" className="password-toggle eye-toggle" aria-label="Show or hide password" onClick={()=>setShowPassword(!showPassword)}>{eye(showPassword)}</button></div></label><div className="form-actions"><button type="submit" className="auth-primary-button" disabled={platformBusy}>{platformBusy?'⏳ Signing in…':(platformInitialized?'🛡️ Sign in as Platform Owner':'🛡️ Create Platform Owner')}</button></div></form>{platformInitialized&&<button type="button" className="auth-secondary-button" onClick={()=>setPlatformAuthView('forgot')}>🔑 Forgot Platform Password</button>}<button type="button" className="auth-secondary-button platform-return-button" onClick={()=>{resetPlatformAuthState();setAuthMode('login');setLoginError('')}}>← Back to Property Login</button></>}
+          {platformAuthView==='forgot'?<><h2>Forgot Platform Password</h2><p className="subtitle">Enter your Platform Owner User ID and registered recovery email. A one-time reset code will be emailed to you.</p><form className="resident-form auth-form" onSubmit={requestPlatformPasswordReset}><label>Platform User ID<input required value={platformForgot.username} onChange={e=>setPlatformForgot({...platformForgot,username:e.target.value})}/></label><label>Registered Recovery Email<input required type="email" value={platformForgot.email} onChange={e=>setPlatformForgot({...platformForgot,email:e.target.value})}/></label><div className="form-actions"><button type="submit" className="auth-primary-button">📧 Send Platform Reset Email</button></div></form><button type="button" className="auth-back-button" onClick={()=>{resetPlatformAuthState();setAuthMode('platform')}}>← Back to Platform Owner Login</button></>:platformAuthView==='reset'?<><h2>Reset Platform Password</h2><p className="subtitle">Enter the one-time code received by email and create a new Platform Owner password.</p><form className="resident-form auth-form" onSubmit={confirmPlatformPasswordReset}><label>Reset Code<input required value={platformReset.token} onChange={e=>setPlatformReset({...platformReset,token:e.target.value})}/></label><label>New Password<div className="password-field"><input required minLength={8} type={showPassword?'text':'password'} value={platformReset.new_password} onChange={e=>setPlatformReset({...platformReset,new_password:e.target.value})}/><button type="button" className="password-toggle eye-toggle" onClick={()=>setShowPassword(!showPassword)}>{eye(showPassword)}</button></div></label><label>Confirm Initial Password<div className="password-field"><input required minLength={8} type={showConfirmPassword?'text':'password'} value={platformReset.confirm_password} onChange={e=>setPlatformReset({...platformReset,confirm_password:e.target.value})}/><button type="button" className="password-toggle eye-toggle" onClick={()=>setShowConfirmPassword(!showConfirmPassword)}>{eye(showConfirmPassword)}</button></div></label><div className="form-actions"><button type="submit" className="auth-primary-button">🔐 Reset Platform Password</button></div></form><div className="auth-navigation"><button type="button" className="auth-back-button" onClick={()=>{resetPlatformAuthState();setAuthMode('platform')}}>← Back to Platform Owner Login</button></div></>:<><div className="platform-auth-heading"><div className="platform-brand-icon" aria-hidden="true">🛡️</div><div><h2>{platformInitialized?'Platform Owner Login':'Set Up Platform Owner'}</h2><p>Secure Product Owner access and controlled platform administration.</p></div></div><form key={platformAuthFormKey} autoComplete="off" className="resident-form auth-form" onSubmit={platformSignIn}>{!platformInitialized&&<label>Full Name<input required value={platformBootstrap.full_name} onChange={e=>setPlatformBootstrap({...platformBootstrap,full_name:e.target.value})}/></label>}{!platformInitialized&&<label>Recovery Email<input required type="email" value={platformBootstrap.email} onChange={e=>setPlatformBootstrap({...platformBootstrap,email:e.target.value})}/></label>}<label>{platformInitialized?'Platform Owner User ID / Recovery Email':'Platform Owner User ID'}<input autoComplete="off" autoCapitalize="none" readOnly name={`platform-owner-user-id-${platformAuthFormKey}`} onFocus={e=>e.currentTarget.removeAttribute('readonly')} required value={platformInitialized?platformLogin.username:platformBootstrap.username} onChange={e=>platformInitialized?setPlatformLogin({...platformLogin,username:e.target.value}):setPlatformBootstrap({...platformBootstrap,username:e.target.value})}/></label><label>Password<div className="password-field"><input autoComplete="new-password" readOnly name={`platform-owner-password-${platformAuthFormKey}`} onFocus={e=>e.currentTarget.removeAttribute('readonly')} required minLength={8} type={showPassword?'text':'password'} value={platformInitialized?platformLogin.password:platformBootstrap.password} onChange={e=>platformInitialized?setPlatformLogin({...platformLogin,password:e.target.value}):setPlatformBootstrap({...platformBootstrap,password:e.target.value})}/><button type="button" className="password-toggle eye-toggle" aria-label="Show or hide password" onClick={()=>setShowPassword(!showPassword)}>{eye(showPassword)}</button></div></label><div className="form-actions"><button type="button" className="auth-primary-button" onClick={()=>platformSignIn()} disabled={platformBusy}>{platformBusy?'⏳ Signing in…':(platformInitialized?'🛡️ Sign in as Platform Owner':'🛡️ Create Platform Owner')}</button></div></form>{platformInitialized&&<button type="button" className="auth-secondary-button" onClick={()=>setPlatformAuthView('forgot')}>🔑 Forgot Platform Password</button>}<button type="button" className="auth-secondary-button platform-return-button" onClick={()=>{resetPlatformAuthState();setAuthMode('login');setLoginError('')}}>← Back to Property Login</button></>}
       </>}
       <div className="auth-links">{accountInitialized && <button type="button" className="auth-secondary-button" onClick={()=>{if(!showCreate)setAccountForm(newApartmentAccountForm());setAuthMode(showCreate?'login':'create');setLoginError('')}}>{showCreate?'← Already have an account? Login':'＋ Create New Apartment Account'}</button>}<button type="button" className="auth-secondary-button platform-link" onClick={()=>{resetPlatformAuthState();setAuthMode('platform');setLoginError('')}}>🛡️ Platform Owner Access</button></div>
     </section></div>;
@@ -2352,16 +2302,7 @@ button{cursor:pointer}
         .auth-brand h1{font-size:32px!important;line-height:1.1!important;color:#172b4d!important;margin:0 0 8px!important;font-weight:850!important;letter-spacing:-.03em!important}
         .auth-brand p{font-size:16px!important;color:#315f96!important;font-weight:750!important;margin:0 0 4px!important}.auth-brand em{font-style:normal!important;color:#0f8a5f!important;font-weight:650!important}
         .auth-widgets{display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:14px!important;margin:0 0 24px!important}.auth-widget{padding:16px!important;border:1px solid #dbe4ef!important;border-radius:14px!important;background:linear-gradient(145deg,#fff,#f5f8fc)!important;box-shadow:0 7px 18px rgba(23,43,77,.06)!important}.auth-widget span{font-size:20px!important}.auth-widget b{display:block!important;margin:7px 0 4px!important;color:#172b4d!important}.auth-widget small{color:#64748b!important;line-height:1.4!important}
-        .auth-form{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:16px!important;padding:20px!important;background:#f8fafc!important;border:1px solid #dbe4ef!important;border-radius:16px!important}.auth-form h3,.auth-form .form-actions,.auth-form .field-hint{grid-column:1/-1!important}.auth-form label{display:flex!important;flex-direction:column!important;gap:7px!important;color:#334155!important;font-weight:750!important}.auth-form input,.auth-form select{width:100%!important;max-width:100%!important;min-width:0!important;min-height:44px!important;box-sizing:border-box!important;border:1px solid #c8d5e5!important;border-radius:10px!important;background:#fff!important;padding:10px 12px!important;color:#172b4d!important}.auth-form>label{min-width:0!important;box-sizing:border-box!important}.auth-form .password-field{min-width:0!important}.auth-form .password-field input{min-width:0!important;box-sizing:border-box!important}.auth-form input:focus,.auth-form select:focus{outline:none!important;border-color:#2563eb!important;box-shadow:0 0 0 3px rgba(37,99,235,.12)!important}
-        /* V6.5.13 ALIGNMENT FIX 5 — password fields stay on one row with a proper eye button. */
-        .auth-card .auth-form .password-field{display:grid!important;grid-template-columns:minmax(0,1fr) 44px!important;align-items:stretch!important;gap:8px!important;width:100%!important;min-width:0!important;box-sizing:border-box!important}
-        .auth-card .auth-form .password-field input{grid-column:1!important;width:100%!important;min-width:0!important;max-width:none!important}
-        .auth-card .auth-form .password-field .password-toggle{grid-column:2!important;width:44px!important;min-width:44px!important;height:44px!important;min-height:44px!important;max-height:44px!important;display:flex!important;align-items:center!important;justify-content:center!important;box-sizing:border-box!important;border:1px solid #c8d5e5!important;border-radius:10px!important;background:#edf4ff!important;color:#172b4d!important;font-size:17px!important;line-height:1!important;padding:0!important;margin:0!important;cursor:pointer!important;box-shadow:0 2px 6px rgba(23,43,77,.06)!important}
-        .auth-card .auth-form .password-field .password-toggle:hover{background:#e2edff!important;border-color:#9dbbe8!important}
-        .auth-card .auth-form .password-form-field .password-help,.auth-card .auth-form .password-form-field .password-help-spacer{display:block!important;line-height:1.45!important;min-height:0!important;margin:0!important}
-        .auth-card .auth-form .password-form-field .password-field{margin-top:0!important}
-        .auth-card{box-sizing:border-box!important;min-width:0!important}
-        @media(max-width:760px){.auth-card .auth-form{grid-template-columns:1fr!important}.auth-card .auth-form .password-field{grid-template-columns:minmax(0,1fr) 44px!important}}
+        .auth-form{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:16px!important;padding:20px!important;background:#f8fafc!important;border:1px solid #dbe4ef!important;border-radius:16px!important}.auth-form h3,.auth-form .form-actions,.auth-form .field-hint{grid-column:1/-1!important}.auth-form label{display:flex!important;flex-direction:column!important;gap:7px!important;color:#334155!important;font-weight:750!important}.auth-form input,.auth-form select{width:100%!important;max-width:100%!important;min-width:0!important;min-height:44px!important;box-sizing:border-box!important;border:1px solid #c8d5e5!important;border-radius:10px!important;background:#fff!important;padding:10px 12px!important;color:#172b4d!important}.auth-form>label{min-width:0!important;box-sizing:border-box!important}.auth-form .password-field{min-width:0!important;display:grid!important;grid-template-columns:minmax(0,1fr) 48px!important;gap:8px!important;align-items:stretch!important}.auth-form .password-field input{min-width:0!important;box-sizing:border-box!important;width:100%!important}.auth-form .password-field .password-toggle{width:48px!important;min-width:48px!important;min-height:44px!important;margin:0!important}.auth-form .password-form-field{align-self:start!important}.auth-form .password-helper{display:block!important;min-height:2.7em!important;line-height:1.35!important;color:#64748b!important;font-weight:650!important}.auth-form .password-helper-empty{visibility:hidden!important}.auth-form input:focus,.auth-form select:focus{outline:none!important;border-color:#2563eb!important;box-shadow:0 0 0 3px rgba(37,99,235,.12)!important}
         /* V6.5.11: Remember control is intentionally NOT an input checkbox. */
         .auth-card .remember-login{display:inline-flex!important;align-items:center!important;gap:8px!important;min-height:24px!important;color:#334155!important;font-weight:700!important}
         .auth-card .remember-toggle{appearance:none!important;-webkit-appearance:none!important;width:16px!important;height:16px!important;min-width:16px!important;min-height:16px!important;max-width:16px!important;max-height:16px!important;box-sizing:border-box!important;flex:0 0 16px!important;margin:0!important;padding:0!important;border:1px solid #9aabc0!important;border-radius:4px!important;background:#fff!important;box-shadow:none!important;display:inline-grid!important;place-items:center!important;cursor:pointer!important;line-height:1!important} .remember-login .remember-toggle,.platform-owner-auth-shell .remember-toggle{width:16px!important;height:16px!important;min-width:16px!important;min-height:16px!important;max-width:16px!important;max-height:16px!important;inline-size:16px!important;block-size:16px!important;flex:0 0 16px!important;padding:0!important;margin:0!important;border:1px solid #9aabc0!important;box-sizing:border-box!important;appearance:none!important;-webkit-appearance:none!important;transform:none!important}
@@ -2372,32 +2313,12 @@ button{cursor:pointer}
         .auth-card .remember-login>span{line-height:1.35!important}
         .auth-primary-button{background:linear-gradient(135deg,#2563eb,#0f9f9a)!important;color:#fff!important;border:0!important;border-radius:11px!important;min-height:44px!important;padding:10px 18px!important;font-weight:800!important;box-shadow:0 8px 18px rgba(37,99,235,.22)!important}.auth-secondary-button,.auth-back-button{background:#fff!important;color:#315f96!important;border:1px solid #c8d5e5!important;border-radius:10px!important;min-height:40px!important;padding:8px 14px!important;font-weight:750!important}.account-id-preview{padding:13px 15px!important;border:1px solid #bfdbfe!important;border-radius:12px!important;background:#eff6ff!important;color:#1d4ed8!important;font-weight:750!important;margin-bottom:14px!important}
         @media(max-width:760px){.auth-shell{padding:14px!important}.auth-card{padding:20px!important;border-radius:18px!important}.auth-brand{align-items:flex-start!important;flex-direction:column!important}.auth-widgets,.auth-form{grid-template-columns:1fr!important}.auth-logo{width:130px!important;height:92px!important}.auth-logo img{width:120px!important;height:84px!important}.auth-brand h1{font-size:26px!important}}
-      
-      /* V6.5.13 CORE FUNCTIONALITY FIX 15 — Platform Owner branding alignment */
-      .platform-owner-auth-shell .auth-brand{
-        display:flex!important;flex-direction:row!important;align-items:center!important;justify-content:flex-start!important;
-        gap:18px!important;width:100%!important;box-sizing:border-box!important;text-align:left!important;
-      }
-      .platform-owner-auth-shell .auth-brand .auth-logo{
-        flex:0 0 88px!important;width:88px!important;height:68px!important;display:flex!important;align-items:center!important;justify-content:center!important;
-        margin:0!important;border-radius:14px!important;overflow:hidden!important;background:#fff!important;border:1px solid #dbe5ef!important;padding:4px!important;
-      }
-      .platform-owner-auth-shell .auth-brand .auth-logo img{width:100%!important;height:100%!important;object-fit:contain!important;display:block!important}
-      .platform-owner-auth-shell .auth-brand-copy{display:flex!important;flex-direction:column!important;align-items:flex-start!important;justify-content:center!important;min-width:0!important}
-      .platform-owner-auth-shell .auth-brand-copy h1{margin:0!important;line-height:1.12!important}
-      .platform-owner-auth-shell .auth-brand-copy p{margin:5px 0 0!important}
-      .platform-owner-auth-shell .auth-brand-copy em{display:block!important;margin:5px 0 0!important}
-      @media(max-width:600px){
-        .platform-owner-auth-shell .auth-brand{gap:12px!important}
-        .platform-owner-auth-shell .auth-brand .auth-logo{flex-basis:72px!important;width:72px!important;height:56px!important}
-        .platform-owner-auth-shell .auth-brand-copy h1{font-size:22px!important}
-      }
-`}</style>
+      `}</style>
       <div className="auth-brand"><div className="auth-logo"><img src="/apartcare-lite-logo.png" alt="ApartCare Lite"/></div><div><h1>ApartCare Lite</h1><p>Your daily partner in property care.</p><em>Helping you run your building beautifully.</em></div></div><div className="auth-widgets"><div className="auth-widget"><span>🏢</span><b>Property Operations</b><small>Maintenance, payments and residents in one place</small></div><div className="auth-widget"><span>📊</span><b>Financial Clarity</b><small>Connected dashboard, expenses and reports</small></div><div className="auth-widget"><span>🔐</span><b>Secure Roles</b><small>Admin and Viewer access with controlled sessions</small></div></div>
       {loginError&&<div className="message">{loginError}</div>}
       {showCreate ? <>
         <h2>Create Apartment Account</h2><div className="account-id-preview">Account Number will be generated automatically after validation.<span className="field-hint">Country Code – State Code – ACL – Date – Sequence</span></div><p className="subtitle">Admin and Viewer access is created inside the property. Platform Super Admin remains exclusive to the Product Owner.</p>
-        <form className="resident-form auth-form" onSubmit={createApartmentAccount}><h3>Apartment Profile</h3><label>Apartment Name<input required value={accountForm.apartment_name} onChange={e=>setAccountForm({...accountForm,apartment_name:e.target.value})}/></label><label>Address<input required value={accountForm.address} onChange={e=>setAccountForm({...accountForm,address:e.target.value})}/></label><label>City<select required value={accountForm.city} onChange={e=>setAccountForm({...accountForm,city:e.target.value})}><option value="">Select City</option>{CITY_OPTIONS.map(x=><option key={x}>{x}</option>)}</select></label><label>State<select required value={accountForm.state} onChange={e=>setAccountForm({...accountForm,state:e.target.value})}><option value="">Select State</option>{STATE_OPTIONS.map(x=><option key={x}>{x}</option>)}</select></label><label>PIN Code<input required value={accountForm.pin_code} onChange={e=>setAccountForm({...accountForm,pin_code:e.target.value})}/></label><label>Country<select required value={accountForm.country} onChange={e=>setAccountForm({...accountForm,country:e.target.value})}>{COUNTRY_OPTIONS.map(x=><option key={x}>{x}</option>)}</select></label><label>Language<select value={accountForm.language} onChange={e=>setAccountForm({...accountForm,language:e.target.value})}><option>English</option><option>Hindi</option><option>Telugu</option></select></label><div className="field-hint operational-start-note">Operational data month selection is derived from the tenant's locked Go-Live Opening Balance. Until an Opening Balance is locked, all MM/YYYY periods remain available.</div><h3>Property Administrator</h3><label>Administrator Name<input required value={accountForm.admin_name} onChange={e=>setAccountForm({...accountForm,admin_name:e.target.value})}/></label><label>Administrator Email<span className="field-hint">Mandatory — welcome email and Account ID are sent here.</span><input required type="email" value={accountForm.admin_email} onChange={e=>setAccountForm({...accountForm,admin_email:e.target.value})}/></label><label>Administrator Mobile Number<input required inputMode="tel" value={accountForm.admin_mobile} onChange={e=>setAccountForm({...accountForm,admin_mobile:e.target.value})}/></label><label>Administrator User ID<input value={accountForm.admin_username} onChange={e=>setAccountForm({...accountForm,admin_username:e.target.value})}/></label><label className="password-form-field initial-password-field"><span className="field-label">Initial Password</span><span className="field-hint password-help">This is the Administrator login password. A password change is required only after an explicit password reset.</span><div className="password-field"><input required minLength={8} type={showCreatePassword?'text':'password'} value={accountForm.password} onChange={e=>setAccountForm({...accountForm,password:e.target.value})}/><button type="button" className="password-toggle eye-toggle" onClick={()=>setShowCreatePassword(!showCreatePassword)}>{eye(showCreatePassword)}</button></div></label><label className="password-form-field confirm-password-field"><span className="field-label">Confirm Password</span><span className="field-hint password-help-spacer" aria-hidden="true">&nbsp;</span><div className="password-field"><input required minLength={8} type={showConfirmPassword?'text':'password'} value={accountForm.confirm_password} onChange={e=>setAccountForm({...accountForm,confirm_password:e.target.value})}/><button type="button" className="password-toggle eye-toggle" onClick={()=>setShowConfirmPassword(!showConfirmPassword)}>{eye(showConfirmPassword)}</button></div></label><div className="form-actions"><button type="submit" className="auth-primary-button" disabled={accountBusy}>{accountBusy?'⏳ Creating Apartment Account…':'🏢 Create Apartment Account'}</button></div></form><div className="auth-navigation"><button type="button" className="auth-back-button" onClick={()=>{setAuthMode('login');setLoginError('')}}>← Back to Login</button></div>
+        <form className="resident-form auth-form" onSubmit={createApartmentAccount}><h3>Apartment Profile</h3><label>Apartment Name<input required value={accountForm.apartment_name} onChange={e=>setAccountForm({...accountForm,apartment_name:e.target.value})}/></label><label>Address<input required value={accountForm.address} onChange={e=>setAccountForm({...accountForm,address:e.target.value})}/></label><label>City<select required value={accountForm.city} onChange={e=>setAccountForm({...accountForm,city:e.target.value})}><option value="">Select City</option>{CITY_OPTIONS.map(x=><option key={x}>{x}</option>)}</select></label><label>State<select required value={accountForm.state} onChange={e=>setAccountForm({...accountForm,state:e.target.value})}><option value="">Select State</option>{STATE_OPTIONS.map(x=><option key={x}>{x}</option>)}</select></label><label>PIN Code<input required value={accountForm.pin_code} onChange={e=>setAccountForm({...accountForm,pin_code:e.target.value})}/></label><label>Country<select required value={accountForm.country} onChange={e=>setAccountForm({...accountForm,country:e.target.value})}>{COUNTRY_OPTIONS.map(x=><option key={x}>{x}</option>)}</select></label><label>Language<select value={accountForm.language} onChange={e=>setAccountForm({...accountForm,language:e.target.value})}><option>English</option><option>Hindi</option><option>Telugu</option></select></label><div className="field-hint operational-start-note">Operational data month selection is derived from the tenant's locked Go-Live Opening Balance. Until an Opening Balance is locked, all MM/YYYY periods remain available.</div><h3>Property Administrator</h3><label>Administrator Name<input required value={accountForm.admin_name} onChange={e=>setAccountForm({...accountForm,admin_name:e.target.value})}/></label><label>Administrator Email<span className="field-hint">Mandatory — welcome email and Account ID are sent here.</span><input required type="email" value={accountForm.admin_email} onChange={e=>setAccountForm({...accountForm,admin_email:e.target.value})}/></label><label>Administrator Mobile Number<input required inputMode="tel" value={accountForm.admin_mobile} onChange={e=>setAccountForm({...accountForm,admin_mobile:e.target.value})}/></label><label>Administrator User ID<input value={accountForm.admin_username} onChange={e=>setAccountForm({...accountForm,admin_username:e.target.value})}/></label><label className="password-form-field">Initial Password<span className="field-hint password-helper">This password is temporary. The Administrator must change it at first login.</span><div className="password-field"><input required minLength={8} type={showCreatePassword?'text':'password'} value={accountForm.password} onChange={e=>setAccountForm({...accountForm,password:e.target.value})}/><button type="button" className="password-toggle eye-toggle" onClick={()=>setShowCreatePassword(!showCreatePassword)}>{eye(showCreatePassword)}</button></div></label><label className="password-form-field">Confirm Password<span className="field-hint password-helper password-helper-empty" aria-hidden="true">&nbsp;</span><div className="password-field"><input required minLength={8} type={showConfirmPassword?'text':'password'} value={accountForm.confirm_password} onChange={e=>setAccountForm({...accountForm,confirm_password:e.target.value})}/><button type="button" className="password-toggle eye-toggle" onClick={()=>setShowConfirmPassword(!showConfirmPassword)}>{eye(showConfirmPassword)}</button></div></label><div className="form-actions"><button type="submit" className="auth-primary-button">🏢 Create Apartment Account</button></div></form><div className="auth-navigation"><button type="button" className="auth-back-button" onClick={()=>{setAuthMode('login');setLoginError('')}}>← Back to Login</button></div>
       </> : authMode==='forgot' ? <><h2>Forgot Password</h2><p className="subtitle">Enter the property Account ID and the registered Administrator Email or User ID. A secure reset code will be sent only to the registered email address.</p><form className="resident-form auth-form" onSubmit={requestPasswordReset}><label>Account ID<input required placeholder={accountExample} value={forgotForm.account_id} onChange={e=>setForgotForm({...forgotForm,account_id:e.target.value.toUpperCase()})}/></label><label>Registered Email / User ID<input required value={forgotForm.email_or_username} onChange={e=>setForgotForm({...forgotForm,email_or_username:e.target.value})}/></label><div className="form-actions"><button type="submit" className="auth-primary-button">📧 Send Password Reset Email</button></div></form><div className="auth-navigation"><button type="button" className="auth-back-button" onClick={()=>{setAuthMode('login');setLoginError('')}}>← Back to Login</button></div></> : authMode==='reset' ? <><h2>Reset Password</h2><p className="subtitle">Check your registered email for the one-time reset code. The code expires after 30 minutes.</p><form className="resident-form auth-form" onSubmit={confirmPasswordReset}><label>Reset Code<input required value={resetForm.token} onChange={e=>setResetForm({...resetForm,token:e.target.value})}/></label><label>New Password<div className="password-field"><input required minLength={8} type={showForgotPassword?'text':'password'} value={resetForm.new_password} onChange={e=>setResetForm({...resetForm,new_password:e.target.value})}/><button type="button" className="password-toggle eye-toggle" onClick={()=>setShowForgotPassword(!showForgotPassword)}>{eye(showForgotPassword)}</button></div></label><label>Confirm Password<div className="password-field"><input required minLength={8} type={showConfirmPassword?'text':'password'} value={resetForm.confirm_password} onChange={e=>setResetForm({...resetForm,confirm_password:e.target.value})}/><button type="button" className="password-toggle eye-toggle" onClick={()=>setShowConfirmPassword(!showConfirmPassword)}>{eye(showConfirmPassword)}</button></div></label><div className="form-actions"><button type="submit" className="auth-primary-button">🔐 Reset Password</button></div></form><button type="button" className="auth-back-button" onClick={()=>{setAuthMode('login');setLoginError('')}}>← Back to Login</button></> : <><h2>Login to Your Property</h2><p className="subtitle">Sign in securely with your Account ID, registered Email / User ID and password. Apartment access uses Admin, Viewer and Supervisor roles.</p><form className="resident-form auth-form" onSubmit={loginToApartCare}><label>Account Number<span className="field-hint">Example: {accountExample}</span><input required placeholder={accountExample} value={loginForm.account_id} onChange={e=>setLoginForm({...loginForm,account_id:e.target.value.toUpperCase()})}/></label><label>Email / User ID<input required value={loginForm.username} onChange={e=>setLoginForm({...loginForm,username:e.target.value})}/></label><label>Password<div className="password-field"><input required type={showPassword?'text':'password'} value={loginForm.password} onChange={e=>setLoginForm({...loginForm,password:e.target.value})}/><button type="button" className="password-toggle eye-toggle" aria-label="Show or hide password" onClick={()=>setShowPassword(!showPassword)}>{eye(showPassword)}</button></div></label><div className="remember-login" role="group" aria-label="Remember Account Number and User on this device"><button type="button" className={`remember-toggle ${rememberLogin?'is-checked':''}`} role="switch" aria-checked={rememberLogin} aria-label="Remember Account Number and User on this device" onClick={()=>setRememberLogin(!rememberLogin)}><span className="remember-toggle-mark" aria-hidden="true">✓</span></button><span>Remember Account Number & User on this device</span></div><div className="remember-note">Your browser may securely remember the password using its password manager. ApartCare does not store your password in application storage.</div><div className="form-actions"><button type="submit" className="auth-primary-button">🔐 Login</button></div></form><button type="button" className="auth-secondary-button" onClick={()=>{setAuthMode('forgot');setLoginError('')}}>🔑 Forgot Password</button></>}
       <div className="auth-links">{accountInitialized && <button type="button" className="auth-secondary-button" onClick={()=>{setAuthMode(showCreate?'login':'create');setLoginError('')}}>{showCreate?'← Already have an account? Login':'＋ Create New Apartment Account'}</button>}<button type="button" className="auth-secondary-button platform-link" onClick={()=>{resetPlatformAuthState();setAuthMode('platform');setLoginError('')}}>🛡️ Platform Owner Access</button></div>
     </section></div>;
@@ -2437,7 +2358,7 @@ button{cursor:pointer}
       .panel,.form-panel,.table-panel,.period-panel,.water-box{border:1px solid var(--line);box-shadow:0 10px 26px rgba(51,65,85,.06);border-radius:16px;background:rgba(255,255,255,.92)}
       button,.button-link{border-radius:10px!important;transition:transform .18s ease,box-shadow .18s ease,filter .18s ease!important;box-shadow:0 5px 14px rgba(59,104,184,.14)} button:hover:not(:disabled),.button-link:hover{transform:translateY(-2px);filter:brightness(1.03);box-shadow:0 9px 20px rgba(59,104,184,.20)}
       .sidebar button{border-radius:10px!important;margin:3px 6px;width:calc(100% - 12px);text-align:left}.sidebar button.active{background:linear-gradient(90deg,#3d67b4,#527bc8)!important;color:#fff;box-shadow:0 8px 18px rgba(26,53,104,.35)}
-      .premium-kpis{gap:20px}.dashboard-kpis{display:grid!important;grid-template-columns:repeat(6,minmax(0,1fr))!important;gap:14px!important;align-items:stretch!important}.dashboard-kpis .kpi-card{min-width:0!important}.kpi-card{position:relative;overflow:hidden;min-height:128px;border-left:5px solid var(--accent);background:linear-gradient(135deg,var(--soft),#fff)!important;box-shadow:0 10px 24px rgba(51,65,85,.10)}.kpi-card .value{font-size:2.05rem;font-weight:800;color:#344054;position:relative;z-index:2}.kpi-card .label{position:relative;z-index:2;font-weight:700}.kpi-glow{position:absolute;width:110px;height:110px;border-radius:50%;right:-35px;bottom:-45px;background:var(--accent);opacity:.10}.kpi-1{--accent:#6b4e9b;--soft:#f3effa}.kpi-2{--accent:#19726a;--soft:#edf8f6}.kpi-3{--accent:#315f96;--soft:#eef4fb}.kpi-4{--accent:#b47712;--soft:#fff7e8}.kpi-5{--accent:#2e7d4e;--soft:#eef9f1}.kpi-6{--accent:#7b5ea7;--soft:#f5f1fb}
+      .premium-kpis{gap:20px}.kpi-card{position:relative;overflow:hidden;min-height:128px;border-left:5px solid var(--accent);background:linear-gradient(135deg,var(--soft),#fff)!important;box-shadow:0 10px 24px rgba(51,65,85,.10)}.kpi-card .value{font-size:2.05rem;font-weight:800;color:#344054;position:relative;z-index:2}.kpi-card .label{position:relative;z-index:2;font-weight:700}.kpi-glow{position:absolute;width:110px;height:110px;border-radius:50%;right:-35px;bottom:-45px;background:var(--accent);opacity:.10}.kpi-1{--accent:#6b4e9b;--soft:#f3effa}.kpi-2{--accent:#19726a;--soft:#edf8f6}.kpi-3{--accent:#315f96;--soft:#eef4fb}.kpi-4{--accent:#b47712;--soft:#fff7e8}.kpi-5{--accent:#2e7d4e;--soft:#eef9f1}.kpi-6{--accent:#7b5ea7;--soft:#f5f1fb}
       .two-donuts{grid-template-columns:repeat(2,minmax(0,1fr));gap:26px}.premium-donut-panel{min-height:470px;padding:26px}.premium-donut-panel h2{margin:0 0 16px}.premium-donut-row{display:flex;align-items:center;justify-content:center;gap:38px;min-height:380px}.premium-donut-chart{width:330px;height:330px;border-radius:50%;position:relative;box-shadow:inset 0 0 0 1px rgba(255,255,255,.6)}.premium-hole{position:absolute;inset:88px;border-radius:50%;background:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;box-shadow:0 2px 18px rgba(15,23,42,.08)}.premium-hole strong{font-size:1.35rem}.premium-hole span{font-size:.85rem;color:#64748b;margin-top:5px}.premium-legend{display:grid;gap:13px;min-width:170px}.premium-legend div{display:grid;grid-template-columns:14px 1fr auto;align-items:center;gap:9px}.premium-legend span{width:14px;height:14px;border-radius:3px}.premium-legend b{font-weight:600}.premium-legend small{color:#64748b;font-weight:700}
       .auth-widget,.auth-card,.platform-card{box-shadow:0 14px 34px rgba(51,65,85,.12)}
       /* V6.2.1 — Global ApartCare action-button standard: primary actions match Login */
@@ -3018,63 +2939,8 @@ input[type="checkbox"]{
         transform:none!important;margin:0!important;padding:0!important;
       }
 
-      /* V6.5.13 CORE FUNCTIONALITY FIX 14 — cloud layout hardening.
-         Keep module identity/title/action areas horizontal on desktop. Forms and
-         dense data-entry fields remain intentionally vertical for usability. */
-      .page-title-row,.section-title-row{display:flex!important;align-items:center!important;justify-content:space-between!important;gap:18px!important;width:100%!important;box-sizing:border-box!important}
-      .page-title-row>div:first-child,.section-title-row>div:first-child{min-width:0!important;flex:1 1 auto!important}
-      .page-title-row>button,.page-title-row>label,.section-title-row>button,.section-title-row>.audit-count-badge{flex:0 0 auto!important}
-      .page-title-row h1,.page-title-row h2,.page-title-row p,.section-title-row h2,.section-title-row h3,.section-title-row p{margin-top:0!important}
-      .module-header,.module-brand-row,.module-identity-row{display:flex!important;align-items:center!important;justify-content:space-between!important;gap:18px!important;flex-wrap:nowrap!important;width:100%!important}
-      .module-header>*:first-child,.module-brand-row>*:first-child,.module-identity-row>*:first-child{min-width:0!important;flex:1 1 auto!important}
-      .module-header>*:last-child,.module-brand-row>*:last-child,.module-identity-row>*:last-child{flex:0 0 auto!important}
-
-      /* V6.5.13 CORE FUNCTIONALITY FIX 13 — deterministic cloud layout. */
-      .identity-header{
-        display:flex!important;flex-direction:row!important;align-items:center!important;justify-content:space-between!important;
-        gap:28px!important;flex-wrap:nowrap!important;width:100%!important;box-sizing:border-box!important;
-      }
-      .identity-header .apartment-brand{
-        display:flex!important;flex:1 1 auto!important;min-width:0!important;align-items:center!important;gap:14px!important;
-      }
-      .identity-header .apartment-brand>div:last-child{min-width:0!important;display:block!important}
-      .identity-header .apartment-brand h2,.identity-header .apartment-brand p{margin-top:0!important;margin-bottom:4px!important}
-      .identity-header .app-brand{
-        display:flex!important;flex:0 0 auto!important;align-items:center!important;gap:12px!important;min-width:300px!important;
-        justify-content:flex-end!important;white-space:nowrap!important;
-      }
-      .identity-header .app-brand>div:last-child{min-width:0!important;display:flex!important;flex-direction:column!important;gap:2px!important}
-      .identity-header .app-brand h2,.identity-header .app-brand p,.identity-header .app-brand em{margin:0!important}
-
-      /* .two-donuts had column sizing without an explicit grid display, so the
-         browser stacked the two dashboard charts vertically. */
-      .two-donuts{
-        display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:24px!important;
-        align-items:stretch!important;width:100%!important;
-      }
-      .two-donuts>.donut-panel,.two-donuts>.premium-donut-panel{min-width:0!important;width:100%!important;box-sizing:border-box!important}
-      @media(max-width:900px){
-        .identity-header{gap:18px!important;padding:14px 18px!important}
-        .identity-header .app-brand{min-width:270px!important}
-        .two-donuts{grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:14px!important}
-      }
-      @media(max-width:680px){
-        .platform-owner-auth-shell .auth-brand{align-items:flex-start!important;gap:12px!important}
-        .platform-owner-auth-shell .auth-logo{width:82px!important;height:60px!important;flex-basis:82px!important}
-        .platform-owner-auth-shell .auth-brand-copy h1{font-size:24px!important}
-        .page-title-row,.section-title-row{align-items:flex-start!important;flex-direction:column!important;gap:10px!important}
-        .page-title-row>button,.page-title-row>label,.section-title-row>button,.section-title-row>.audit-count-badge{align-self:flex-start!important}
-        .identity-header{gap:10px!important;padding:12px 14px!important}
-        .identity-header .apartment-brand{gap:9px!important}
-        .identity-header .app-brand{min-width:245px!important;gap:8px!important}
-        .identity-header .logo-mark{width:50px!important;height:42px!important;flex:0 0 50px!important}
-        .identity-header .app-brand h2{font-size:1rem!important}
-        .identity-header .app-brand p,.identity-header .app-brand em{font-size:.72rem!important;line-height:1.2!important}
-        .identity-header .apartment-brand h2{font-size:1.05rem!important}
-        .identity-header .apartment-brand p{font-size:.72rem!important;line-height:1.2!important}
-        .two-donuts{grid-template-columns:1fr!important}
-      }
-      `}</style>
+      `}      
+</style>
       <header className="identity-header">
         <section className="apartment-brand">
           {settingsForm.apartment_photo_path?<img src={`${API}${settingsForm.apartment_photo_path}`} alt="Apartment profile" className="identity-photo"/>:<div className="building-icon">🏢</div>}
@@ -3101,7 +2967,7 @@ input[type="checkbox"]{
 
         <div className="dashboard-for">Dashboard for: {period==='Monthly'?month:year}</div>
 
-        <section className="kpis premium-kpis dashboard-kpis">
+        <section className="kpis premium-kpis">
           {dashboardCards.map(([label,value],index)=>
             <div className={`card kpi-card kpi-${index+1}`} key={label}>
               <div className="label">{label}</div>
@@ -3474,123 +3340,3 @@ input[type="checkbox"]{
     </main>
   </div>;
 }
-
-      /* V6.5.13 CORE FUNCTIONALITY FIX 15 — final application workspace layout system.
-         Desktop forms use compact multi-column grids; controls remain stacked inside each field.
-         Mobile intentionally collapses to one column for usability. */
-      .main .form-panel,.main .panel,.main .table-panel,.main .water-box{box-sizing:border-box!important}
-      .main .resident-form{
-        display:grid!important;grid-template-columns:repeat(4,minmax(0,1fr))!important;
-        gap:16px 18px!important;padding:18px!important;align-items:start!important;
-      }
-      .main .resident-form>label{
-        display:flex!important;flex-direction:column!important;gap:6px!important;width:100%!important;min-width:0!important;
-        align-self:start!important;color:#334e6f!important;font-weight:750!important;line-height:1.25!important;
-      }
-      .main .resident-form>label.full{grid-column:1/-1!important}
-      .main .resident-form>label>input,.main .resident-form>label>select,.main .resident-form>label>textarea{
-        width:100%!important;min-width:0!important;max-width:100%!important;box-sizing:border-box!important;
-        min-height:42px!important;height:auto!important;margin:0!important;
-      }
-      .main .resident-form>label>textarea{min-height:82px!important;resize:vertical!important}
-      .main .resident-form .form-actions{grid-column:1/-1!important;display:flex!important;align-items:center!important;gap:10px!important;margin-top:2px!important;padding-top:12px!important;border-top:1px solid #e6edf5!important}
-
-      /* Monthly Maintenance — compact four-column setup and water calculation. */
-      .main .maintenance-setup-grid{
-        display:grid!important;grid-template-columns:repeat(4,minmax(0,1fr))!important;gap:14px 16px!important;
-        padding:16px!important;align-items:start!important;
-      }
-      .main .maintenance-setup-grid>label{
-        display:flex!important;flex-direction:column!important;gap:6px!important;min-width:0!important;
-        color:#334e6f!important;font-weight:750!important;line-height:1.25!important;
-      }
-      .main .maintenance-setup-grid>label input,.main .maintenance-setup-grid>label select{
-        width:100%!important;min-width:0!important;box-sizing:border-box!important;min-height:42px!important;
-      }
-      .main .maintenance-setup-grid>label:has(input[type="checkbox"]){
-        position:relative!important;padding-top:0!important;
-      }
-      .main .maintenance-setup-grid>label input[type="checkbox"]{
-        width:16px!important;height:16px!important;min-width:16px!important;min-height:16px!important;
-        margin:0 7px 0 0!important;vertical-align:middle!important;align-self:flex-start!important;
-      }
-      .main .maintenance-setup-grid>label input[type="checkbox"] + *{min-width:0}
-      .main .water-box{padding:16px!important;margin-top:14px!important}
-      .main .water-box>h3{margin:0 0 12px!important}
-      .main .water-box .maintenance-setup-grid{border:0!important;box-shadow:none!important;padding:0!important;background:transparent!important}
-
-      /* Month toolbars: title, month selector and actions share one compact row. */
-      .main .month-heading{
-        display:flex!important;align-items:center!important;justify-content:space-between!important;gap:18px!important;
-        flex-wrap:wrap!important;width:100%!important;margin:0!important;padding:0 0 12px!important;
-      }
-      .main .month-heading>h2{margin:0!important;flex:1 1 auto!important;min-width:220px!important}
-      .main .month-selector{display:flex!important;align-items:center!important;gap:8px!important;flex:0 0 auto!important}
-      .main .month-selector label{display:inline-flex!important;align-items:center!important;gap:8px!important;margin:0!important;font-weight:750!important;color:#52657e!important;white-space:nowrap!important}
-      .main .month-selector input{width:160px!important;min-width:160px!important;min-height:42px!important}
-      .main .payment-period>.page-title-row{display:flex!important;align-items:center!important;justify-content:space-between!important;gap:16px!important;flex-wrap:wrap!important}
-      .main .payment-period>.page-title-row .help-text{flex:1 1 520px!important}
-      .main .payment-period>.page-title-row .form-actions{flex:0 0 auto!important;margin:0!important;padding:0!important;border:0!important}
-
-      /* Payment summary and Expense summary — horizontal KPI cards. */
-      .main .summary-grid,.main .expense-kpis,.main .kpi-grid{
-        display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:14px!important;width:100%!important;
-      }
-      .main .expense-kpis{grid-template-columns:repeat(4,minmax(0,1fr))!important}
-      .main .summary-grid>.card,.main .expense-kpis>.card,.main .kpi-grid>.kpi-card{min-width:0!important;width:100%!important}
-      .main .expense-kpis>.card{min-height:104px!important}
-
-      /* Expense entry — compact professional four-column layout. */
-      .main .professional-expense-form{display:grid!important;grid-template-columns:repeat(4,minmax(0,1fr))!important;gap:14px 16px!important;padding:18px!important;align-items:start!important}
-      .main .professional-expense-form label{min-width:0!important;width:100%!important}
-      .main .professional-expense-form label.wide{grid-column:span 2!important}
-      .main .professional-expense-form .form-actions{grid-column:1/-1!important;display:flex!important;align-items:center!important;gap:10px!important}
-
-      /* Reports — controls sized to the actual data type instead of full workspace width. */
-      .main .report-controls{
-        display:flex!important;align-items:flex-end!important;gap:12px!important;flex-wrap:wrap!important;
-        width:100%!important;box-sizing:border-box!important;
-      }
-      .main .report-controls>label{display:flex!important;flex-direction:column!important;gap:6px!important;flex:0 0 auto!important;width:auto!important;min-width:0!important;color:#334e6f!important;font-weight:750!important}
-      .main .report-controls>label select{width:220px!important;min-width:220px!important;max-width:280px!important;min-height:42px!important}
-      .main .report-controls>label input[type="month"]{width:160px!important;min-width:160px!important}
-      .main .report-controls>label select[value="2024"],.main .report-controls>label select[value="2025"],.main .report-controls>label select[value="2026"],.main .report-controls>label select[value="2027"]{width:120px!important;min-width:120px!important}
-      .main .period-options{display:flex!important;align-items:center!important;gap:8px!important;flex-wrap:wrap!important;width:max-content!important;max-width:100%!important}
-      .main .period-options>label:not(.radio){display:inline-flex!important;align-items:center!important;gap:7px!important;width:auto!important;min-width:0!important}
-      .main .period-options>label:not(.radio) select{width:120px!important;min-width:120px!important}
-      .main .period-options>label:not(.radio) input[type="month"]{width:160px!important;min-width:160px!important}
-      .main .report-tabs{display:flex!important;align-items:center!important;gap:8px!important;flex-wrap:wrap!important}
-      .main .report-tabs button{white-space:nowrap!important}
-
-      /* Dashboard — always horizontal on normal desktop widths. */
-      .main .dashboard-kpis{display:grid!important;grid-template-columns:repeat(6,minmax(125px,1fr))!important;gap:14px!important;width:100%!important;align-items:stretch!important}
-      .main .dashboard-kpis>.kpi-card{min-width:0!important;width:100%!important}
-      .main .two-donuts{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:20px!important;width:100%!important}
-
-      /* Module headers remain horizontal; only mobile intentionally stacks them. */
-      .main .page-title-row,.main .section-title-row{display:flex!important;align-items:center!important;justify-content:space-between!important;gap:16px!important;flex-wrap:wrap!important}
-      .main .page-title-row>div:first-child,.main .section-title-row>div:first-child{min-width:0!important;flex:1 1 auto!important}
-      .main .page-title-row>button,.main .section-title-row>button{flex:0 0 auto!important}
-
-      /* Settings / Administration / Utilities / Go-Live inherit the same compact grid. */
-      .main .utility-form{display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:14px 16px!important;padding:16px!important}
-      .main .utility-form .form-actions{grid-column:1/-1!important}
-      .main .history-toolbar{display:flex!important;align-items:flex-end!important;justify-content:space-between!important;gap:14px!important;flex-wrap:wrap!important}
-      .main .history-toolbar select{width:260px!important;min-width:260px!important}
-
-      @media(max-width:1250px){
-        .main .dashboard-kpis{grid-template-columns:repeat(3,minmax(0,1fr))!important}
-        .main .resident-form,.main .maintenance-setup-grid{grid-template-columns:repeat(2,minmax(0,1fr))!important}
-        .main .professional-expense-form{grid-template-columns:repeat(2,minmax(0,1fr))!important}
-        .main .utility-form{grid-template-columns:repeat(2,minmax(0,1fr))!important}
-        .main .expense-kpis{grid-template-columns:repeat(2,minmax(0,1fr))!important}
-      }
-      @media(max-width:800px){
-        .main .dashboard-kpis,.main .summary-grid,.main .expense-kpis,.main .kpi-grid,.main .two-donuts,.main .resident-form,.main .maintenance-setup-grid,.main .professional-expense-form,.main .utility-form{grid-template-columns:1fr!important}
-        .main .resident-form>label.full,.main .professional-expense-form label.wide{grid-column:auto!important}
-        .main .month-heading{align-items:flex-start!important;flex-direction:column!important}
-        .main .month-selector{width:100%!important}.main .month-selector input{width:100%!important;min-width:0!important}
-        .main .report-controls{align-items:stretch!important;flex-direction:column!important}.main .report-controls>label,.main .report-controls>label select,.main .report-controls>label input[type="month"]{width:100%!important;max-width:none!important;min-width:0!important}
-        .main .period-options{width:100%!important}
-        .main .history-toolbar select{width:100%!important;min-width:0!important}
-      }
