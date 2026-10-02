@@ -1,0 +1,24 @@
+ApartCare Lite V6.5.13 Production Trial
+
+1) Install Vercel CLI if needed:
+   npm i -g vercel
+
+2) From this project root:
+   vercel login
+   vercel link
+
+3) Connect storage in Vercel Dashboard:
+   - Marketplace -> Neon -> install/connect
+   - Storage -> Blob -> create PRIVATE store -> connect to project
+
+4) Deploy:
+   vercel deploy --prod
+
+5) Add domains in Vercel:
+   apartcarelite.com
+   www.apartcarelite.com
+
+6) Verify:
+   https://www.apartcarelite.com/api/health
+
+Expected production_ready=true and storage=postgres.
