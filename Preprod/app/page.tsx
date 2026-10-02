@@ -3371,7 +3371,6 @@ input[type="checkbox"]{
       @media(max-width:1250px){.main .dashboard-kpis{grid-template-columns:repeat(3,minmax(0,1fr))!important}.subscription-new-plan{grid-template-columns:repeat(4,minmax(0,1fr))!important}.subscription-new-plan h3,.subscription-new-plan .trial-plan-help{grid-column:1/-1!important}}
       @media(max-width:800px){.main{padding-left:12px!important;padding-right:12px!important}.main>.identity-header,.main>.header-divider{margin-left:-12px!important;margin-right:-12px!important}.main>.identity-header{padding-left:16px!important;padding-right:16px!important}.main .dashboard-kpis{grid-template-columns:1fr 1fr!important}.main .premium-donut-chart{width:210px!important;height:210px!important;min-width:210px!important;min-height:210px!important;max-width:210px!important;max-height:210px!important;flex-basis:210px!important}.subscription-new-plan{grid-template-columns:1fr 1fr!important}.subscription-new-plan h3,.subscription-new-plan .trial-plan-help{grid-column:1/-1!important}.subscription-new-plan button{grid-column:1/-1!important}}
       @media(max-width:520px){.main .dashboard-kpis{grid-template-columns:1fr!important}.subscription-new-plan{grid-template-columns:1fr!important}.subscription-new-plan h3,.subscription-new-plan .trial-plan-help,.subscription-new-plan button{grid-column:auto!important}.platform-owner-auth-shell .auth-brand-copy{display:block!important}.platform-owner-auth-shell .auth-brand-copy p,.platform-owner-auth-shell .auth-brand-copy em{display:block!important;margin-top:4px!important}}
-      `}
       /* V6.5.13 CLEAN UI BUILD 4 — explicit assignment, utility editor, workspace and action consistency */
       .platform-owner-auth-shell .po-top-header .po-brand-block{display:none!important}
       .platform-owner-auth-shell .po-top-header{justify-content:flex-end!important;min-height:68px!important}
@@ -3388,6 +3387,7 @@ input[type="checkbox"]{
       .utility-category-editor{display:grid!important;grid-template-columns:minmax(220px,1fr) auto auto!important;gap:10px!important;align-items:center!important;padding:12px!important;background:#f8fbff!important;border:1px solid #dbe5ef!important;border-radius:12px!important}
       .utility-category-editor input{min-width:0!important}
       @media(max-width:700px){.platform-owner-auth-shell .subscription-plan-assignment{min-width:0!important;flex-direction:column!important;align-items:stretch!important}.platform-owner-auth-shell .subscription-plan-assignment select,.platform-owner-auth-shell .assign-plan-button{width:100%!important}.utility-category-editor{grid-template-columns:1fr!important}.sidebar nav button{min-height:44px!important}}
+      `}
 </style>
       <header className="identity-header">
         <section className="apartment-brand">
