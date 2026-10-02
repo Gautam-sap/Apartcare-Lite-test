@@ -1,0 +1,148 @@
+diff --git "a/app\\page.tsx" "b/Preprod\\app\\page.tsx"
+index 2e88c19..1e8a109 100644
+--- "a/app\\page.tsx"
++++ "b/Preprod\\app\\page.tsx"
+@@ -29,7 +29,7 @@ type Payment = {
+ };
+ type PaymentSummary = {month_key:string;total_maintenance:number;previous_balance:number;total_due:number;total_collected:number;total_pending:number;payment_count:number};
+ type DashboardKpis = {previous_month_closing:number;total_maintenance:number;total_collected:number;total_expenses:number;current_balance:number;total_available_amount:number};
+-type ChargeSettings = { tenant_id:string; apartment_id:string; account_id?:string; account_mobile?:string; apartment_name:string; address:string; city:string; pin_code:string; state:string; country:string; language:string; no_of_flats:number; no_of_flats_editable:boolean; common_maintenance:number; cca:number; watchman_salary:number; watchman_salary_locked:boolean; apartment_photo_name:string; apartment_photo_path:string; apartment_photo_data_url?:string; };
++type ChargeSettings = { tenant_id:string; apartment_id:string; account_id?:string; account_mobile?:string; apartment_name:string; address:string; city:string; pin_code:string; state:string; country:string; language:string; no_of_flats:number; no_of_flats_editable:boolean; common_maintenance:number; cca:number; watchman_salary:number; watchman_salary_locked:boolean; apartment_photo_name:string; apartment_photo_path:string; };
+ type Watchman = {id:string; tenant_id:string; apartment_id:string; name:string; mobile_no:string; start_date:string; end_date:string|null; salary:number; locked:boolean; remarks:string; deleted:boolean; deleted_at:string|null; deleted_reason:string;};
+ type OpeningBalance = {id:string; tenant_id:string; apartment_id:string; go_live_month:string; opening_balance:number; locked:boolean; saved_at:string;};
+ type OpeningHistory = {id:string; tenant_id:string; apartment_id:string; go_live_month:string; opening_balance:number; action:string; changed_at:string; justification?:string; changed_by?:string;};
+@@ -208,13 +208,10 @@ export default function Home(){
+   const [platformSubscriptionHistoryTenantId,setPlatformSubscriptionHistoryTenantId]=useState('');
+   const [platformSubscriptionHistory,setPlatformSubscriptionHistory]=useState<any[]>([]);
+   const platformActionLocks=useRef<Set<string>>(new Set());
+-  const [platformBusyKeys,setPlatformBusyKeys]=useState<Set<string>>(new Set());
+-  const isPlatformBusy=(key:string)=>platformBusyKeys.has(key);
+   const runPlatformAction=async(key:string,action:()=>Promise<void>|void)=>{
+     if(platformActionLocks.current.has(key)) return;
+     platformActionLocks.current.add(key);
+-    setPlatformBusyKeys(prev=>new Set(prev).add(key));
+-    try{ await action(); } finally { platformActionLocks.current.delete(key); setPlatformBusyKeys(prev=>{const next=new Set(prev);next.delete(key);return next;}); }
++    try{ await action(); } finally { platformActionLocks.current.delete(key); }
+   };
+   const [accountBusy,setAccountBusy]=useState(false);
+   const [platformForgot,setPlatformForgot]=useState({username:'',email:''});
+@@ -312,7 +309,7 @@ export default function Home(){
+   const apartmentQuery=()=>{const tid=encodeURIComponent(resolvedApartmentId());return `tenant_id=${tid}&apartment_id=${tid}`;};
+   const [settingsForm,setSettingsForm]=useState<ChargeSettings>({
+     tenant_id:activeApartmentId,apartment_id:activeApartmentId,apartment_name:'ApartCare Lite',address:'',city:'',pin_code:'',state:'',country:'India',language:'English',no_of_flats:0,no_of_flats_editable:true,common_maintenance:750,cca:500,
+-    watchman_salary:0,watchman_salary_locked:false,apartment_photo_name:'',apartment_photo_path:'',apartment_photo_data_url:''
++    watchman_salary:0,watchman_salary_locked:false,apartment_photo_name:'',apartment_photo_path:''
+   });
+   const [settingsLoading,setSettingsLoading]=useState(false);
+   const [settingsEffectiveMonth,setSettingsEffectiveMonth]=useState(new Date().toISOString().slice(0,7));
+@@ -484,7 +481,7 @@ export default function Home(){
+   useEffect(()=>{
+     if(currentUser?.tenant_id){
+       const tid=String(currentUser.tenant_id);
+-      setSettingsForm({tenant_id:tid,apartment_id:tid,account_id:'',account_mobile:'',apartment_name:'',address:'',city:'',pin_code:'',state:'',country:'India',language:'English',no_of_flats:0,no_of_flats_editable:true,common_maintenance:750,cca:500,watchman_salary:0,watchman_salary_locked:false,apartment_photo_name:'',apartment_photo_path:'',apartment_photo_data_url:''});
++      setSettingsForm({tenant_id:tid,apartment_id:tid,account_id:'',account_mobile:'',apartment_name:'',address:'',city:'',pin_code:'',state:'',country:'India',language:'English',no_of_flats:0,no_of_flats_editable:true,common_maintenance:750,cca:500,watchman_salary:0,watchman_salary_locked:false,apartment_photo_name:'',apartment_photo_path:''});
+       setTenantDataStartMonth('');
+       setOpeningBalance(null);setOpeningHistory([]);setOpeningEditMode(false);setShowUnlockDialog(false);setUnlockJustification('');
+       // Bootstrap tenant-owned header/settings immediately after login so the
+@@ -507,9 +504,12 @@ export default function Home(){
+             account_id:loginForm.account_id.trim().toUpperCase(),
+             username:loginForm.username.trim()
+           }));
+-          // Standard policy: application storage contains only Account Number and User ID.
+-          // Passwords are never written by ApartCare; users may use the browser's own
+-          // password manager independently.
++          // ApartCare never stores the password in application storage.
++          const nav:any=navigator;
++          const PasswordCredentialCtor=(window as any).PasswordCredential;
++          if(nav.credentials?.store && typeof PasswordCredentialCtor==='function'){
++            await nav.credentials.store(new PasswordCredentialCtor({id:loginForm.username,password:loginForm.password,name:loginForm.username})).catch(()=>{});
++          }
+         }catch{}
+       }else{
+         window.localStorage.removeItem('apartcare_login_identity');
+@@ -864,12 +864,12 @@ export default function Home(){
+   };
+   const clearTenantClientState=()=>{
+     setActiveApartmentId('');setAccountId('');setTenantDataStartMonth('');setTenantSubscription(null);setTenantSubscriptionMessage('');
+-    setSettingsForm({tenant_id:'',apartment_id:'',account_id:'',account_mobile:'',apartment_name:'',address:'',city:'',pin_code:'',state:'',country:'India',language:'English',no_of_flats:0,no_of_flats_editable:true,common_maintenance:750,cca:500,watchman_salary:0,watchman_salary_locked:false,apartment_photo_name:'',apartment_photo_path:'',apartment_photo_data_url:''});
++    setSettingsForm({tenant_id:'',apartment_id:'',account_id:'',account_mobile:'',apartment_name:'',address:'',city:'',pin_code:'',state:'',country:'India',language:'English',no_of_flats:0,no_of_flats_editable:true,common_maintenance:750,cca:500,watchman_salary:0,watchman_salary_locked:false,apartment_photo_name:'',apartment_photo_path:''});
+     setResidents([]);setMaintenanceRows([]);setSummary(null);setPayments([]);setPaymentSummary(null);setDashboardKpis(null);setWaterHeader(null);setWatchmen([]);setUtilityContacts([]);setUtilityCategories([]);setWatchmanHistory([]);setOpeningBalance(null);setOpeningHistory([]);
+     setExpenses([]);setExpenseSummary(null);setExpensePaymentSummary(null);setExpenseHistory([]);setExpenseLockHistory([]);setAllFlatsReport(null);setYearlyCollectionReport(null);setYearlyExpense(null);setFlatStatement(null);setIndividualMaintenance([]);setReportFlats([]);setLoginHistory([]);setAdminUsers([]);setResidentHistory([]);setPaymentLockHistory([]);setPaymentLock(null);setPaymentForms({});setSelectedMaintenanceIds([]);setSelectedPaymentFlats([]);setEditingResidentId(null);setEditingExpenseId(null);setEditingWatchmanId(null);setEditingUtilityId(null);
+     setSettingsMessage('');setUtilityMessage('');setExpenseMessage('');setPaymentMessage('');setResidentMessage('');setMaintenanceMessage('');setReportMessage('');setAdminMessage('');
+   };
+-  const logoutApartCare=async()=>{try{if(authToken)await fetch(`${API}/api/admin/auth/logout`,{method:'POST',headers:{'X-ApartCare-Token':authToken}});}finally{window.localStorage.removeItem('apartcare_session');clearTenantClientState();setMustChangePassword(false);setCurrentUser(null);setAuthToken('');setUtilityEditReady(false);setLoginError('');try{const remembered=JSON.parse(window.localStorage.getItem('apartcare_login_identity')||'null');if(remembered?.account_id||remembered?.username){setLoginForm({account_id:String(remembered.account_id||''),username:String(remembered.username||''),password:''});setRememberLogin(true);}else{setLoginForm({account_id:'',username:'',password:''});setRememberLogin(false);}}catch{setLoginForm({account_id:'',username:'',password:''});}setAuthMode('login');}};
++  const logoutApartCare=async()=>{try{if(authToken)await fetch(`${API}/api/admin/auth/logout`,{method:'POST',headers:{'X-ApartCare-Token':authToken}});}finally{window.localStorage.removeItem('apartcare_session');clearTenantClientState();setMustChangePassword(false);setCurrentUser(null);setAuthToken('');setUtilityEditReady(false);setLoginError('');setAuthMode('login');}};
+   useEffect(()=>{
+     const raw=typeof window!=='undefined'?window.localStorage.getItem('apartcare_session'):null;
+     if(!raw)return;
+@@ -1465,22 +1465,7 @@ export default function Home(){
+   const saveAdminUser=async(e:React.FormEvent)=>{e.preventDefault();setAdminMessage('');const r=await fetch(`${API}/api/admin/users`,{method:'POST',headers:{'Content-Type':'application/json','X-ApartCare-Token':authToken},body:JSON.stringify(adminForm)});if(!r.ok){const d=await r.json().catch(()=>null);setAdminMessage(d?.detail||'Unable to create user.');return;}setAdminMessage('User created successfully. A welcome email has been queued for the registered email address.');setAdminForm({username:'',full_name:'',email:'',mobile_no:'',role:'Viewer',password:''});await loadAdmin();};
+   const updateAdminUser=async(id:string,patch:any)=>{const r=await fetch(`${API}/api/admin/users/${id}`,{method:'PUT',headers:{'Content-Type':'application/json','X-ApartCare-Token':authToken},body:JSON.stringify(patch)});if(!r.ok){const d=await r.json().catch(()=>null);setAdminMessage(d?.detail||'Unable to update user.');return;}await loadAdmin();};
+   const resetAdminPassword=async(id:string)=>{const p=window.prompt('Enter new password (minimum 8 characters):');if(!p)return;const r=await fetch(`${API}/api/admin/users/${id}/reset-password`,{method:'POST',headers:{'Content-Type':'application/json','X-ApartCare-Token':authToken},body:JSON.stringify({new_password:p,force_change:true})});if(!r.ok){const d=await r.json().catch(()=>null);setAdminMessage(d?.detail||'Unable to reset password.');return;}setAdminMessage('Temporary password set. The user must change it at next login.');await loadAdmin();};
+-  const uploadApartmentPhoto=async(file:File)=>{
+-    if(!['image/jpeg','image/png','image/webp'].includes(file.type)){setSettingsMessage('Use JPG, PNG or WEBP for the apartment profile photo.');return;}
+-    if(file.size>5*1024*1024){setSettingsMessage('Apartment profile photo must be 5 MB or smaller.');return;}
+-    setSettingsLoading(true);setSettingsMessage('Uploading apartment profile photo…');
+-    try{
+-      const reader=new FileReader();
+-      const dataUrl=await new Promise<string>((resolve,reject)=>{reader.onload=()=>resolve(String(reader.result||''));reader.onerror=()=>reject(new Error('Unable to read the selected image.'));reader.readAsDataURL(file);});
+-      const token=await getValidatedPropertyToken();
+-      if(!token)throw new Error('Login session is required. Please log in again.');
+-      const r=await fetch(`${API}/api/settings/apartment-photo`,{method:'POST',headers:{'Content-Type':'application/json','X-ApartCare-Token':token},body:JSON.stringify({tenant_id:resolvedApartmentId(),apartment_id:resolvedApartmentId(),photo_name:file.name,photo_data_url:dataUrl})});
+-      const d=await r.json().catch(()=>null);
+-      if(!r.ok)throw new Error(d?.detail||`Unable to upload photo (HTTP ${r.status}).`);
+-      setSettingsForm(d);setSettingsMessage('Apartment profile photo saved successfully.');
+-    }catch(e:any){setSettingsMessage(e?.message||'Unable to upload photo.');}
+-    finally{setSettingsLoading(false);}
+-  };
++  const uploadApartmentPhoto=async(file:File)=>{if(!['image/jpeg','image/png','image/webp'].includes(file.type)){setSettingsMessage('Use JPG, PNG or WEBP for the apartment profile photo.');return;}if(file.size>5*1024*1024){setSettingsMessage('Apartment profile photo must be 5 MB or smaller.');return;}const reader=new FileReader();reader.onload=async()=>{const r=await fetch(`${API}/api/settings/apartment-photo`,{method:'POST',headers:{'Content-Type':'application/json','X-ApartCare-Token':authToken},body:JSON.stringify({tenant_id:resolvedApartmentId(),apartment_id:resolvedApartmentId(),photo_name:file.name,photo_data_url:String(reader.result)})});if(!r.ok){const d=await r.json().catch(()=>null);setSettingsMessage(d?.detail||'Unable to upload photo.');return;}const data=await r.json();setSettingsForm(data);setSettingsMessage('Apartment profile photo saved.');};reader.readAsDataURL(file);};
+ 
+   useEffect(()=>{ if(tab==='Payments'){ loadPayments(false); loadPaymentLock(); } },[tab,paymentMonth]);
+   useEffect(()=>{ if(tab==='Expenses'){ resetExpenseForm(); loadExpenses(false,expenseMonth); loadYearlyExpenses(expenseYear); } },[tab,expenseMonth]);
+@@ -2415,7 +2400,7 @@ button{cursor:pointer}
+             <div className="subscription-plan-grid">{platformPlans.map(plan=><article className="subscription-plan-card" key={plan.id}><div className="plan-top"><span>{plan.name}</span><b>{plan.active?'ACTIVE':'INACTIVE'}</b></div><p>{plan.description}</p><label>Monthly ₹<input type="number" min="0" value={plan.monthly_price} onChange={e=>setPlatformPlans(prev=>prev.map((x:any)=>x.id===plan.id?{...x,monthly_price:Number(e.target.value||0)}:x))} onBlur={e=>updatePlanPrice({...plan,monthly_price:Number(e.target.value||0)},'monthly_price',e.target.value)}/></label><label>Annual ₹<input type="number" min="0" value={plan.annual_price} onChange={e=>setPlatformPlans(prev=>prev.map((x:any)=>x.id===plan.id?{...x,annual_price:Number(e.target.value||0)}:x))} onBlur={e=>updatePlanPrice({...plan,annual_price:Number(e.target.value||0)},'annual_price',e.target.value)}/></label><small>{Object.entries(plan.features||{}).filter(([,v])=>v).map(([k])=>k).join(' • ')}</small></article>)}</div>
+             <form className="subscription-new-plan" onSubmit={createPlatformPlan}><h3>Create New Plan</h3><input placeholder="Plan Code" value={newPlanForm.code} onChange={e=>setNewPlanForm({...newPlanForm,code:e.target.value.toUpperCase()})}/><input placeholder="Plan Name" value={newPlanForm.name} onChange={e=>setNewPlanForm({...newPlanForm,name:e.target.value})}/><input placeholder="Description" value={newPlanForm.description} onChange={e=>setNewPlanForm({...newPlanForm,description:e.target.value})}/><input type="number" min="0" placeholder="Monthly ₹" value={newPlanForm.monthly_price} onChange={e=>setNewPlanForm({...newPlanForm,monthly_price:e.target.value})}/><input type="number" min="0" placeholder="Annual ₹" value={newPlanForm.annual_price} onChange={e=>setNewPlanForm({...newPlanForm,annual_price:e.target.value})}/><label className="trial-plan-toggle"><input type="checkbox" checked={newPlanForm.trial_enabled} onChange={e=>setNewPlanForm({...newPlanForm,trial_enabled:e.target.checked})}/> Trial Plan</label><input className="trial-duration-input" type="number" min="1" placeholder="Trial duration" value={newPlanForm.trial_value} disabled={!newPlanForm.trial_enabled} onChange={e=>setNewPlanForm({...newPlanForm,trial_value:e.target.value})}/><select className="trial-unit-select" value={newPlanForm.trial_unit} disabled={!newPlanForm.trial_enabled} onChange={e=>setNewPlanForm({...newPlanForm,trial_unit:e.target.value})}><option>Days</option><option>Months</option><option>Years</option></select><button type="submit" disabled={planCreating}>{planCreating?'Creating…':'＋ Create Plan'}</button><small className="trial-plan-help">Enable Trial Plan to create a Product Owner controlled duration. Assigning this plan to an account starts the configured trial immediately.</small></form>
+             <div className="subscription-table-toolbar"><input value={platformSubscriptionSearch} onChange={e=>setPlatformSubscriptionSearch(e.target.value)} placeholder="Search Account / Apartment / Plan / Status"/><button type="button" className="secondary" onClick={()=>loadPlatformSubscriptions(platformToken)}>↻ Refresh</button></div>
+-            <div className="table-scroll business-grid"><table className="subscription-table"><thead><tr><th>Account</th><th>Apartment</th><th>Type</th><th>Plan</th><th>Status</th><th>Payment</th><th>Trial / Validity</th><th>Actions</th></tr></thead><tbody>{platformSubscriptions.filter((row:any)=>{const q=platformSubscriptionSearch.trim().toLowerCase();if(!q)return true;const a=row.account||{},s=row.subscription||{},sum=row.summary||{};return [a.account_id,a.apartment_name,a.account_mobile,s.subscription_type,s.status,sum.plan?.name].some((v:any)=>String(v||'').toLowerCase().includes(q));}).map((row:any)=><tr key={row.subscription.id}><td><b>{row.account.account_id}</b></td><td>{row.account.apartment_name}<small>{row.account.city}, {row.account.state}</small></td><td><span className={`subscription-type type-${String(row.subscription.subscription_type).toLowerCase()}`}>{row.subscription.subscription_type}</span></td><td><div className="subscription-plan-assignment"><select value={platformSelectedPlanByTenant[row.account.tenant_id] ?? row.subscription.plan_id ?? ''} onChange={e=>setPlatformSelectedPlanByTenant(prev=>({...prev,[row.account.tenant_id]:e.target.value}))}><option value="">Select Plan</option>{platformPlans.filter((p:any)=>p.active).map((p:any)=><option key={p.id} value={p.id}>{p.name}{p.trial_enabled?` — Trial ${p.trial_value} ${p.trial_unit}`:` — ₹${Number(p.monthly_price).toLocaleString('en-IN')}/mo`}</option>)}</select><button type="button" className="secondary assign-plan-button" disabled={!((platformSelectedPlanByTenant[row.account.tenant_id] ?? row.subscription.plan_id)||'')||isPlatformBusy(`platform-assign-plan:${row.account.tenant_id}`)} onClick={()=>platformAssignPlan(row,platformSelectedPlanByTenant[row.account.tenant_id] ?? row.subscription.plan_id ?? '')}>{isPlatformBusy(`platform-assign-plan:${row.account.tenant_id}`)?'Assigning…':'Assign'}</button></div></td><td><span className={`subscription-status status-${String(row.summary.status).toLowerCase()}`}>{row.summary.status}</span>{row.summary.days_remaining!==null&&<small>{row.summary.days_remaining} days</small>}</td><td>{row.summary.payment_status}</td><td>{row.subscription.trial_end_date?<>Trial: {formatDate(row.subscription.trial_end_date)}<small>{row.subscription.grace_end_date?`Grace: ${formatDate(row.subscription.grace_end_date)}`:''}</small></>:row.subscription.end_date?`Valid to ${formatDate(row.subscription.end_date)}`:'—'}</td><td className="subscription-actions">{row.subscription.subscription_type==='TRIAL'&&<button type="button" className="secondary" onClick={()=>platformExtendTrialFromSubscription(row)}>＋ Extend Trial</button>}<button type="button" className="secondary" onClick={()=>loadPlatformSubscriptionHistory(platformToken,row.account.tenant_id)}>🕘 History</button><button type="button" className="secondary" onClick={()=>platformGrantComplimentary(row)}>🎁 Complimentary</button></td></tr>)}</tbody></table></div>
++            <div className="table-scroll business-grid"><table className="subscription-table"><thead><tr><th>Account</th><th>Apartment</th><th>Type</th><th>Plan</th><th>Status</th><th>Payment</th><th>Trial / Validity</th><th>Actions</th></tr></thead><tbody>{platformSubscriptions.filter((row:any)=>{const q=platformSubscriptionSearch.trim().toLowerCase();if(!q)return true;const a=row.account||{},s=row.subscription||{},sum=row.summary||{};return [a.account_id,a.apartment_name,a.account_mobile,s.subscription_type,s.status,sum.plan?.name].some((v:any)=>String(v||'').toLowerCase().includes(q));}).map((row:any)=><tr key={row.subscription.id}><td><b>{row.account.account_id}</b></td><td>{row.account.apartment_name}<small>{row.account.city}, {row.account.state}</small></td><td><span className={`subscription-type type-${String(row.subscription.subscription_type).toLowerCase()}`}>{row.subscription.subscription_type}</span></td><td><div className="subscription-plan-assignment"><select value={platformSelectedPlanByTenant[row.account.tenant_id] ?? row.subscription.plan_id ?? ''} onChange={e=>setPlatformSelectedPlanByTenant(prev=>({...prev,[row.account.tenant_id]:e.target.value}))}><option value="">Select Plan</option>{platformPlans.filter((p:any)=>p.active).map((p:any)=><option key={p.id} value={p.id}>{p.name}{p.trial_enabled?` — Trial ${p.trial_value} ${p.trial_unit}`:` — ₹${Number(p.monthly_price).toLocaleString('en-IN')}/mo`}</option>)}</select><button type="button" className="secondary assign-plan-button" disabled={!((platformSelectedPlanByTenant[row.account.tenant_id] ?? row.subscription.plan_id)||'')} onClick={()=>platformAssignPlan(row,platformSelectedPlanByTenant[row.account.tenant_id] ?? row.subscription.plan_id ?? '')}>Assign</button></div></td><td><span className={`subscription-status status-${String(row.summary.status).toLowerCase()}`}>{row.summary.status}</span>{row.summary.days_remaining!==null&&<small>{row.summary.days_remaining} days</small>}</td><td>{row.summary.payment_status}</td><td>{row.subscription.trial_end_date?<>Trial: {formatDate(row.subscription.trial_end_date)}<small>{row.subscription.grace_end_date?`Grace: ${formatDate(row.subscription.grace_end_date)}`:''}</small></>:row.subscription.end_date?`Valid to ${formatDate(row.subscription.end_date)}`:'—'}</td><td className="subscription-actions">{row.subscription.subscription_type==='TRIAL'&&<button type="button" className="secondary" onClick={()=>platformExtendTrialFromSubscription(row)}>＋ Extend Trial</button>}<button type="button" className="secondary" onClick={()=>loadPlatformSubscriptionHistory(platformToken,row.account.tenant_id)}>🕘 History</button><button type="button" className="secondary" onClick={()=>platformGrantComplimentary(row)}>🎁 Complimentary</button></td></tr>)}</tbody></table></div>
+             {platformSubscriptionHistoryTenantId&&<div className="platform-subscription-history">
+               <div className="section-title-row"><div><h3>Subscription History</h3><p className="help-text">Every plan, trial, complimentary-access and lifecycle change for the selected apartment account is retained here.</p></div><button type="button" className="secondary" onClick={()=>{setPlatformSubscriptionHistoryTenantId('');setPlatformSubscriptionHistory([])}}>Close</button></div>
+               <div className="table-scroll business-grid"><table><thead><tr><th>Date / Time</th><th>Action</th><th>Previous Plan</th><th>New Plan</th><th>Previous Status</th><th>New Status</th><th>Trial / Validity</th><th>Changed By</th><th>Reason</th></tr></thead><tbody>{platformSubscriptionHistory.length===0?<tr><td colSpan={9} className="empty">No subscription history found.</td></tr>:platformSubscriptionHistory.map((h:any)=><tr key={h.id}><td>{formatDateTime(h.changed_at)}</td><td><b>{h.action}</b></td><td>{platformPlans.find((p:any)=>p.id===h.old_plan_id)?.name||'—'}</td><td>{platformPlans.find((p:any)=>p.id===h.new_plan_id)?.name||'—'}</td><td>{h.old_status||'—'}</td><td>{h.new_status||'—'}</td><td>{h.new_trial_end?formatDate(h.new_trial_end):'—'}</td><td>{h.changed_by||'—'}</td><td>{h.reason||'—'}</td></tr>)}</tbody></table></div>
+@@ -3388,14 +3373,6 @@ input[type="checkbox"]{
+       @media(max-width:520px){.main .dashboard-kpis{grid-template-columns:1fr!important}.subscription-new-plan{grid-template-columns:1fr!important}.subscription-new-plan h3,.subscription-new-plan .trial-plan-help,.subscription-new-plan button{grid-column:auto!important}.platform-owner-auth-shell .auth-brand-copy{display:block!important}.platform-owner-auth-shell .auth-brand-copy p,.platform-owner-auth-shell .auth-brand-copy em{display:block!important;margin-top:4px!important}}
+       /* V6.5.13 CLEAN UI BUILD 4 — explicit assignment, utility editor, workspace and action consistency */
+       .platform-owner-auth-shell .po-top-header .po-brand-block{display:none!important}
+-      .platform-owner-auth-shell .po-top-header{justify-content:flex-end!important}
+-      .platform-owner-auth-shell .platform-owner-console button{min-height:38px!important;border-radius:9px!important;font-weight:750!important;transition:transform .14s ease,box-shadow .14s ease,background .14s ease!important}
+-      .platform-owner-auth-shell .platform-owner-console button:active{transform:translateY(1px)!important}
+-      .platform-owner-auth-shell .platform-owner-console button:disabled{opacity:.58!important;cursor:not-allowed!important;transform:none!important}
+-      .shell .main{min-height:100vh!important}
+-      .sidebar{min-height:100vh!important}
+-      .sidebar .user-session button{min-height:38px!important;border-radius:9px!important;font-weight:750!important}
+-      .sidebar nav{min-height:calc(100vh - 190px)!important}
+       .platform-owner-auth-shell .po-top-header{justify-content:flex-end!important;min-height:68px!important}
+       .platform-owner-auth-shell .po-page-header{padding-top:18px!important;padding-bottom:16px!important}
+       .platform-owner-auth-shell .subscription-plan-assignment{display:flex!important;align-items:center!important;gap:7px!important;min-width:245px!important}
+@@ -3410,12 +3387,11 @@ input[type="checkbox"]{
+       .utility-category-editor{display:grid!important;grid-template-columns:minmax(220px,1fr) auto auto!important;gap:10px!important;align-items:center!important;padding:12px!important;background:#f8fbff!important;border:1px solid #dbe5ef!important;border-radius:12px!important}
+       .utility-category-editor input{min-width:0!important}
+       @media(max-width:700px){.platform-owner-auth-shell .subscription-plan-assignment{min-width:0!important;flex-direction:column!important;align-items:stretch!important}.platform-owner-auth-shell .subscription-plan-assignment select,.platform-owner-auth-shell .assign-plan-button{width:100%!important}.utility-category-editor{grid-template-columns:1fr!important}.sidebar nav button{min-height:44px!important}}
+-
+       `}
+ </style>
+       <header className="identity-header">
+         <section className="apartment-brand">
+-          {(settingsForm.apartment_photo_path||settingsForm.apartment_photo_data_url)?<img src={settingsForm.apartment_photo_data_url||`${API}${settingsForm.apartment_photo_path}`} alt="Apartment profile" className="identity-photo"/>:<div className="building-icon">🏢</div>}
++          {settingsForm.apartment_photo_path?<img src={`${API}${settingsForm.apartment_photo_path}`} alt="Apartment profile" className="identity-photo"/>:<div className="building-icon">🏢</div>}
+           <div><h2>{settingsForm.apartment_name||'Apartment'}</h2>{accountId&&<p className="account-context">Account: <b>{accountDisplay(accountId,settingsForm.country,settingsForm.state)}</b></p>}<p>{settingsForm.address||'Apartment address not set'}</p><p>{[settingsForm.city,settingsForm.state,settingsForm.pin_code,settingsForm.country].filter(Boolean).join(', ')}</p></div>
+         </section>
+         <section className="app-brand">
+@@ -3671,7 +3647,7 @@ input[type="checkbox"]{
+           <h2>Default Monthly Charges</h2>
+           <p className="help-text">These values are copied into a new month. Changing Settings does not alter already generated maintenance records.</p>
+           <form onSubmit={saveSettings} className="resident-form">
+-            <div className="apartment-photo-settings professional-upload"><div className="upload-widget-icon">🖼️</div><div className="upload-widget-copy"><b>Apartment Profile Photo</b><small>JPG, PNG or WEBP • Maximum 5 MB</small></div><label className="upload-button">Choose File<input type="file" accept="image/jpeg,image/png,image/webp" onChange={e=>{const file=e.target.files?.[0];if(file)uploadApartmentPhoto(file)}}/></label>{(settingsForm.apartment_photo_path||settingsForm.apartment_photo_data_url)&&<img src={settingsForm.apartment_photo_data_url||`${API}${settingsForm.apartment_photo_path}`} alt="Apartment profile" className="apartment-profile-photo"/>}</div>
++            <div className="apartment-photo-settings professional-upload"><div className="upload-widget-icon">🖼️</div><div className="upload-widget-copy"><b>Apartment Profile Photo</b><small>JPG, PNG or WEBP • Maximum 5 MB</small></div><label className="upload-button">Choose File<input type="file" accept="image/jpeg,image/png,image/webp" onChange={e=>{const file=e.target.files?.[0];if(file)uploadApartmentPhoto(file)}}/></label>{settingsForm.apartment_photo_path&&<img src={`${API}${settingsForm.apartment_photo_path}`} alt="Apartment profile" className="apartment-profile-photo"/>}</div>
+             <label>Apartment Name
+               <input value={settingsForm.apartment_name} onChange={e=>setSettingsForm({...settingsForm,apartment_name:e.target.value})}/>
+             </label>

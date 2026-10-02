@@ -1,1 +1,0 @@
-"""ApartCare Lite backend package."""
