@@ -18,7 +18,14 @@ import os
 import re
 import tempfile
 import smtplib
+import threading
+import contextvars
+import time
 import psycopg
+try:
+    from psycopg_pool import ConnectionPool
+except Exception:
+    ConnectionPool = None
 try:
     from vercel.blob import BlobClient, AsyncBlobClient
 except Exception:
@@ -27,7 +34,7 @@ except Exception:
 from email.message import EmailMessage
 from pydantic import BaseModel, Field, model_validator
 
-app = FastAPI(title="ApartCare2 API", version="6.5.13")
+app = FastAPI(title="ApartCare2 API", version="6.5.13-CLEAN-UI-BUILD-4")
 
 
 @app.middleware("http")
@@ -44,30 +51,45 @@ async def strip_public_api_prefix(request: Request, call_next):
     return await call_next(request)
 
 
-# V6.5.13 CORE FUNCTIONALITY FIX 8 — serverless-safe runtime paths.
-# IMPORTANT: Vercel's deployed bundle (/var/task) is read-only. Do not derive
-# writable runtime directories from __file__ and do not allow deployment
-# environment variables to redirect serverless writes back into /var/task.
+# V6.5.13 CORE FUNCTIONALITY FIX 9 — Vercel filesystem boundary.
 #
-# Vercel normally exposes VERCEL/VERCEL_ENV, but the runtime path itself is
-# deliberately based on tempfile.gettempdir() so this remains safe even if a
-# platform environment flag is missing during function initialization.
-IS_VERCEL = bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("NOW_REGION"))
+# Vercel Services runs Python from /var/task. That directory is READ-ONLY.
+# The previous fixes still allowed the fallback branch to use __file__.parent
+# when Vercel did not expose the expected environment flag, which caused:
+#   OSError: [Errno 30] Read-only file system: '/var/task/app/templates'
+#
+# Detect the deployed filesystem itself as well as the normal Vercel flags.
+# Only /tmp is writable at runtime. Templates are application assets and are
+# never created with mkdir(). If a bundled templates directory exists, it is
+# served read-only from the deployment package.
+_SOURCE_DIR = Path(__file__).resolve().parent
+_IS_DEPLOYED_READONLY = str(_SOURCE_DIR).startswith("/var/task")
+IS_VERCEL = bool(
+    os.getenv("VERCEL")
+    or os.getenv("VERCEL_ENV")
+    or os.getenv("NOW_REGION")
+    or _IS_DEPLOYED_READONLY
+)
+
 if IS_VERCEL:
     RUNTIME_DIR = Path(tempfile.gettempdir()) / "apartcare"
     UPLOAD_DIR = RUNTIME_DIR / "uploads"
-    TEMPLATE_DIR = RUNTIME_DIR / "templates"
+    # Templates, when bundled, are read-only application assets.
+    TEMPLATE_DIR = _SOURCE_DIR / "templates"
 else:
-    RUNTIME_DIR = Path(os.getenv("APARTCARE_RUNTIME_DIR", str(Path(__file__).resolve().parent)))
+    RUNTIME_DIR = Path(os.getenv("APARTCARE_RUNTIME_DIR", str(_SOURCE_DIR)))
     UPLOAD_DIR = Path(os.getenv("APARTCARE_UPLOAD_DIR", str(RUNTIME_DIR / "uploads")))
     TEMPLATE_DIR = Path(os.getenv("APARTCARE_TEMPLATE_DIR", str(RUNTIME_DIR / "templates")))
 
-# These are the only runtime-created directories used by the application.
-# Never mkdir beside this source file when running as a Vercel service.
+# Only these directories are runtime-writable. Never mkdir TEMPLATE_DIR.
 RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
-app.mount("/templates", StaticFiles(directory=str(TEMPLATE_DIR)), name="templates")
+
+# Do not let a missing optional templates folder prevent the whole FastAPI
+# application from importing. The import-template endpoint will report a
+# normal 404 until the corresponding workbook is bundled.
+if TEMPLATE_DIR.is_dir():
+    app.mount("/templates", StaticFiles(directory=str(TEMPLATE_DIR)), name="templates")
 
 
 
@@ -144,6 +166,7 @@ class ChargeSettings(TenantScopedModel):
     watchman_salary_locked: bool = False
     apartment_photo_name: str = ""
     apartment_photo_path: str = ""
+    apartment_photo_data_url: str = ""
 
 class ChargeHistory(TenantScopedModel):
     id: str
@@ -599,10 +622,15 @@ def health():
             "production_ready": False,
         }
     try:
-        conn = _db_connect()
-        if conn is None:
-            raise RuntimeError("DATABASE_URL is not configured")
-        conn.close()
+        pool = _get_db_pool()
+        if pool is not None:
+            with pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                    cur.fetchone()
+        else:
+            conn = psycopg.connect(DATABASE_URL, connect_timeout=3, sslmode='require')
+            conn.close()
         return {
             "status": "ok",
             "version": "6.5.13",
@@ -1278,8 +1306,15 @@ def lock_expense(expense_id: str, locked: bool=True, reason: str="", x_apartcare
 
 # ---------- Settings / Operational Defaults ----------
 @app.get("/settings/charges", response_model=ChargeSettings)
-def get_charge_settings(apartment_id: str = "demo-apartment"):
-    return charge_settings.get(apartment_id, ChargeSettings(apartment_id=apartment_id))
+def get_charge_settings(apartment_id: str = "demo-apartment", tenant_id: str = "", x_apartcare_token: str | None = Header(default=None)):
+    requested = str(tenant_id or apartment_id or "demo-apartment")
+    if x_apartcare_token:
+        actor=_current_actor(x_apartcare_token)
+        canonical=_actor_apartment_id(actor)
+        if requested not in {canonical, "", "demo-apartment"}:
+            raise HTTPException(status_code=403, detail="Tenant context mismatch.")
+        requested=canonical
+    return charge_settings.get(requested, ChargeSettings(apartment_id=requested, tenant_id=requested))
 
 @app.get("/settings/charges/effective")
 def get_effective_charge_settings(month_key: str, apartment_id: str = "demo-apartment"):
@@ -1304,6 +1339,8 @@ def save_charge_settings(data: ChargeSettings, effective_month: str = "", x_apar
     if existing and not data.apartment_photo_path:
         data.apartment_photo_name = existing.apartment_photo_name
         data.apartment_photo_path = existing.apartment_photo_path
+    if existing and not data.apartment_photo_data_url:
+        data.apartment_photo_data_url = getattr(existing, "apartment_photo_data_url", "")
     charge_settings[apartment_id] = data
     versions=[h.version for h in charge_history if h.apartment_id==apartment_id and h.effective_month==effective_month]
     now=datetime.now().isoformat(timespec="microseconds")
@@ -1326,19 +1363,25 @@ def save_apartment_photo(data: ApartmentPhotoInput, x_apartcare_token: str | Non
     if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
         raise HTTPException(status_code=400, detail="Use JPG, PNG or WEBP for the apartment profile photo.")
     safe_name = f"apartment_{data.apartment_id}{suffix}"
+    blob_saved = False
     if os.getenv('BLOB_READ_WRITE_TOKEN') and BlobClient is not None:
         try:
             client = BlobClient()
             client.put(f"apartcare/apartments/{safe_name}", raw, access="private", overwrite=True)
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Unable to store apartment logo in production storage: {exc}")
-    else:
+            blob_saved = True
+        except Exception:
+            blob_saved = False
+    if not blob_saved:
         target = UPLOAD_DIR / safe_name
         target.write_bytes(raw)
-    settings = charge_settings.get(data.apartment_id, ChargeSettings(apartment_id=data.apartment_id))
+    settings = charge_settings.get(data.apartment_id, ChargeSettings(apartment_id=data.apartment_id, tenant_id=data.apartment_id))
     settings.apartment_photo_name = data.photo_name
-    settings.apartment_photo_path = f"/uploads/{safe_name}"
+    settings.apartment_photo_path = f"/uploads/{safe_name}" if blob_saved else ""
+    # Vercel instances are ephemeral when Blob is not configured. Keep a tenant-scoped
+    # fallback data URL so the profile photo survives refreshes/redeploys.
+    settings.apartment_photo_data_url = data.photo_data_url if not blob_saved else ""
     charge_settings[data.apartment_id] = settings
+    _save_state()
     return settings
 
 @app.get("/uploads/{filename}")
@@ -2436,10 +2479,15 @@ def admin_login(data: AdminLoginInput, account_id: str = ""):
         if not user or user.locked or not user.active or tenant_passwords.get(user.id)!=_password_hash(data.password):
             raise HTTPException(status_code=401, detail="Invalid User ID or password.")
         user.tenant_id = tenant_account.tenant_id
+        # FIX 12: a normal account-created password is immediately usable.
+        # Only an explicit password reset (which updates updated_at) can force a change.
+        if user.force_password_change and user.created_at == user.updated_at:
+            user.force_password_change=False
         failed_key=f"{tenant_account.tenant_id}:{user.username.casefold()}"
         if tenant_passwords.get(user.id)!=_password_hash(data.password):
             failed_login_counts[failed_key]=failed_login_counts.get(failed_key,0)+1
             _audit(user.username,"Failed","Login",f"Invalid password; Tenant {tenant_account.account_id}",user.id,tenant_account.tenant_id)
+            _save_state()
             if failed_login_counts[failed_key] >= 5:
                 user.locked=True; user.updated_at=datetime.now().isoformat(timespec="seconds")
                 _audit(user.username,"Blocked","Account Locked",f"Five consecutive failed login attempts; Tenant {tenant_account.account_id}",user.id,tenant_account.tenant_id)
@@ -2448,6 +2496,7 @@ def admin_login(data: AdminLoginInput, account_id: str = ""):
         failed_login_counts.pop(failed_key,None)
         token=secrets.token_urlsafe(32); auth_sessions[token]=user.id; tenant_sessions[token]=(tenant_account.tenant_id,user.id)
         _audit(user.username,"Success","Login",f"Tenant {tenant_account.account_id}",user.id,tenant_account.tenant_id)
+        _save_state()
         return {"user":user,"token":token,"account":_account_payload(tenant_account)}
     settings=charge_settings.get("demo-apartment", ChargeSettings())
     expected=getattr(settings,"account_id", "")
@@ -2475,14 +2524,20 @@ def admin_login(data: AdminLoginInput, account_id: str = ""):
     if admin_passwords.get(user.id) != _password_hash(data.password):
         key=user.username.lower(); failed_login_counts[key]=failed_login_counts.get(key,0)+1
         _audit(user.username, "Failed", "Login", "Invalid password", user.id)
+        _save_state()
         if failed_login_counts[key] >= 5:
             user.locked=True; user.updated_at=datetime.now().isoformat(timespec="seconds")
             _audit(user.username, "Blocked", "Account Locked", "Five consecutive failed login attempts", user.id)
             raise HTTPException(status_code=403, detail="Account locked after repeated failed login attempts. Contact an Administrator.")
         raise HTTPException(status_code=401, detail="Invalid User ID or password")
     failed_login_counts.pop(user.username.lower(), None)
+    # FIX 12: legacy users created before the policy fix must not be forced to
+    # change their original password merely because the record was persisted.
+    if user.force_password_change and user.created_at == user.updated_at:
+        user.force_password_change=False
     token = secrets.token_urlsafe(32); auth_sessions[token] = user.id
     _audit(user.username, "Success", "Login", user_id=user.id)
+    _save_state()
     return AuthLoginResponse(user=user, token=token, account={"tenant_id":"demo-apartment","account_id":getattr(settings,"account_id",""),"apartment_name":settings.apartment_name})
 
 @app.post("/admin/auth/request-password-reset")
@@ -2577,8 +2632,17 @@ def change_own_password(data: ChangePasswordInput, x_apartcare_token: str | None
 @app.post("/admin/auth/logout")
 def admin_logout(x_apartcare_token: str | None = Header(default=None)):
     if x_apartcare_token:
+        user_id=auth_sessions.get(x_apartcare_token)
+        user=next((u for u in admin_users if u.id==user_id),None)
+        if not user and user_id:
+            for users in tenant_users.values():
+                user=next((u for u in users if u.id==user_id),None)
+                if user: break
+        if user:
+            _audit(user.username,"Success","Logout","Property session ended",user.id,getattr(user,"tenant_id",None))
         auth_sessions.pop(x_apartcare_token, None)
         tenant_sessions.pop(x_apartcare_token, None)
+        _save_state()
     return {"logged_out": True}
 
 @app.get("/admin/users", response_model=list[AdminUser])
@@ -2617,7 +2681,7 @@ def create_admin_user(data: AdminUserInput, background_tasks: BackgroundTasks, x
     if mobile and len([c for c in mobile if c.isdigit()]) < 7:
         raise HTTPException(status_code=422, detail="Enter a valid Mobile Number.")
     now = datetime.now().isoformat(timespec="seconds")
-    user = AdminUser(id=str(uuid4()), username=data.username.strip(), full_name=data.full_name.strip(), email=email, mobile_no=mobile, role=data.role, created_at=now, updated_at=now, force_password_change=True, tenant_id=tenant_id)
+    user = AdminUser(id=str(uuid4()), username=data.username.strip(), full_name=data.full_name.strip(), email=email, mobile_no=mobile, role=data.role, created_at=now, updated_at=now, force_password_change=False, tenant_id=tenant_id)
     admin_users.append(user); admin_passwords[user.id] = _password_hash(data.password)
     if tenant_id:
         tenant_users.setdefault(tenant_id, []).append(user)
@@ -2705,7 +2769,8 @@ def download_administration_history(username: str = "", x_apartcare_token: str |
     rows = _tenant_history_rows(actor, username)
     out=StringIO(); w=csv.writer(out); w.writerow(["Date / Time","User ID","Event","Status","Reason"])
     for h in rows: w.writerow([h.at,h.username,h.event,h.status,h.reason or ""])
-    filename="ApartCare_Login_Administration_History" + ("_All_Users" if not key or key=="all" else "_"+re.sub(r"[^A-Za-z0-9_.-]+","_",username.strip())) + ".csv"
+    username_key=username.strip().lower()
+    filename="ApartCare_Login_Administration_History" + ("_All_Users" if not username_key or username_key=="all" else "_"+re.sub(r"[^A-Za-z0-9_.-]+","_",username.strip())) + ".csv"
     return StreamingResponse(iter([out.getvalue().encode("utf-8-sig")]),media_type="text/csv; charset=utf-8",headers={"Content-Disposition":f'attachment; filename="{filename}"'})
 
 
@@ -2780,7 +2845,7 @@ class TenantStatusUpdate(BaseModel):
 
 
 class SubscriptionSettings(BaseModel):
-    trial_enabled: bool = True
+    trial_enabled: bool = False
     default_trial_value: int = Field(default=30, ge=1, le=3650)
     default_trial_unit: Literal["Days", "Months"] = "Days"
     default_grace_value: int = Field(default=7, ge=0, le=365)
@@ -2805,6 +2870,12 @@ class SubscriptionPlan(BaseModel):
     currency: str = "INR"
     active: bool = True
     features: dict[str, bool] = Field(default_factory=dict)
+    # Product Owner controlled trial duration for this plan. A plan is a trial
+    # plan only when trial_enabled is explicitly checked; existing paid plans
+    # remain unchanged for backward compatibility.
+    trial_enabled: bool = False
+    trial_value: int = Field(default=0, ge=0, le=36500)
+    trial_unit: Literal["Days", "Months", "Years"] = "Days"
     created_at: str
     updated_at: str
 
@@ -2898,6 +2969,9 @@ class SubscriptionPlanInput(BaseModel):
     currency: str = Field(default="INR", min_length=3, max_length=3)
     active: bool = True
     features: dict[str, bool] = Field(default_factory=dict)
+    trial_enabled: bool = False
+    trial_value: int = Field(default=0, ge=0, le=36500)
+    trial_unit: Literal["Days", "Months", "Years"] = "Days"
 
 class SubscriptionPlanUpdate(BaseModel):
     name: str | None = None
@@ -2906,6 +2980,9 @@ class SubscriptionPlanUpdate(BaseModel):
     annual_price: float | None = Field(default=None, ge=0)
     active: bool | None = None
     features: dict[str, bool] | None = None
+    trial_enabled: bool | None = None
+    trial_value: int | None = Field(default=None, ge=0, le=36500)
+    trial_unit: Literal["Days", "Months", "Years"] | None = None
 
 class SubscriptionTrialExtensionInput(BaseModel):
     value: int = Field(ge=1, le=3650)
@@ -2939,6 +3016,11 @@ def _add_period(start_iso: str, value: int, unit: str) -> str:
     d = date.fromisoformat(start_iso[:10])
     if unit == "Days":
         return (d + timedelta(days=value)).isoformat()
+    if unit == "Years":
+        import calendar
+        year = d.year + value
+        day = min(d.day, calendar.monthrange(year, d.month)[1])
+        return date(year, d.month, day).isoformat()
     # Calendar-month arithmetic: preserve end-of-month semantics.
     month = d.month - 1 + value
     year = d.year + month // 12
@@ -2981,17 +3063,34 @@ def _record_subscription_history(sub: Subscription, actor: str, action: str, rea
         old_trial_end=old.trial_end_date, new_trial_end=sub.trial_end_date, reason=reason
     ))
 
+def _plan_is_trial(plan: SubscriptionPlan | None) -> bool:
+    if not plan:
+        return False
+    if plan.trial_enabled:
+        return True
+    # Compatibility for older V6.5 zero-cost plans named Trial/Trail.
+    if plan.monthly_price == 0 and plan.annual_price == 0:
+        label=f"{plan.code} {plan.name}".casefold()
+        return "trial" in label or "trail" in label
+    return False
+
+def _plan_trial_period(plan: SubscriptionPlan) -> tuple[int,str]:
+    if plan.trial_value and plan.trial_value >= 1:
+        return int(plan.trial_value), str(plan.trial_unit)
+    return 30, "Days"
+
 def _create_subscription_for_tenant(tenant_id: str, created_at: str, actor: str = "system") -> Subscription:
     existing = _subscription_for_tenant(tenant_id)
     if existing:
         return existing
     created_date = created_at[:10]
     now = datetime.now().isoformat(timespec="seconds")
+    default_plan_id = subscription_settings.default_plan_id or next(iter(subscription_plans), "")
     if subscription_settings.trial_enabled:
         end = _add_period(created_date, subscription_settings.default_trial_value, subscription_settings.default_trial_unit)
-        sub = Subscription(id=str(uuid4()), tenant_id=tenant_id, subscription_type="TRIAL", plan_id="", status="TRIAL", payment_status="NOT_REQUIRED", trial_start_date=created_date, trial_end_date=end, created_at=now, updated_at=now, created_by=actor, last_reason="Trial created from Apartment Account creation date")
+        sub = Subscription(id=str(uuid4()), tenant_id=tenant_id, subscription_type="TRIAL", plan_id=default_plan_id, status="TRIAL", payment_status="NOT_REQUIRED", trial_start_date=created_date, trial_end_date=end, created_at=now, updated_at=now, created_by=actor, last_reason="Trial explicitly enabled by Product Owner policy")
     else:
-        sub = Subscription(id=str(uuid4()), tenant_id=tenant_id, subscription_type="PAID", plan_id=subscription_settings.default_plan_id, status="PAST_DUE", payment_status="PENDING", created_at=now, updated_at=now, created_by=actor, last_reason="Payment required; trial disabled")
+        sub = Subscription(id=str(uuid4()), tenant_id=tenant_id, subscription_type="PAID", plan_id=default_plan_id, status="PAST_DUE", payment_status="PENDING", start_date=created_date, created_at=now, updated_at=now, created_by=actor, last_reason="Default plan assigned from Product Owner subscription policy; payment pending")
     subscriptions[sub.id] = sub
     _record_subscription_history(sub, actor, "Created", sub.last_reason, old=Subscription(id=str(uuid4()), tenant_id=tenant_id, created_at=now, updated_at=now))
     return sub
@@ -3158,6 +3257,8 @@ def platform_subscription_plans(x_auth_token: str | None = Header(default=None))
 @app.post('/platform/subscription/plans', response_model=SubscriptionPlan, status_code=201)
 def platform_create_subscription_plan(data: SubscriptionPlanInput, x_auth_token: str | None = Header(default=None)):
     actor = _platform_actor(x_auth_token)
+    if data.trial_enabled and data.trial_value < 1:
+        raise HTTPException(status_code=422, detail="Trial Plan duration must be at least 1 Day, Month or Year.")
     if any(p.code.casefold() == data.code.casefold() for p in subscription_plans.values()):
         raise HTTPException(status_code=409, detail="Subscription Plan Code already exists.")
     now = datetime.now().isoformat(timespec="seconds")
@@ -3170,7 +3271,12 @@ def platform_create_subscription_plan(data: SubscriptionPlanInput, x_auth_token:
 def platform_update_subscription_plan(plan_id: str, data: SubscriptionPlanUpdate, x_auth_token: str | None = Header(default=None)):
     actor = _platform_actor(x_auth_token); plan = subscription_plans.get(plan_id)
     if not plan: raise HTTPException(status_code=404, detail="Subscription plan not found.")
-    for k,v in data.model_dump(exclude_none=True).items(): setattr(plan,k,v)
+    incoming=data.model_dump(exclude_none=True)
+    effective_trial=bool(incoming.get("trial_enabled",plan.trial_enabled))
+    effective_value=int(incoming.get("trial_value",plan.trial_value or 0))
+    if effective_trial and effective_value < 1:
+        raise HTTPException(status_code=422, detail="Trial Plan duration must be at least 1 Day, Month or Year.")
+    for k,v in incoming.items(): setattr(plan,k,v)
     plan.updated_at = datetime.now().isoformat(timespec="seconds")
     platform_audit.append({"at":plan.updated_at,"event":"Subscription Plan Updated","actor":actor.username,"detail":plan.code})
     _save_state(); return plan
@@ -3178,11 +3284,22 @@ def platform_update_subscription_plan(plan_id: str, data: SubscriptionPlanUpdate
 @app.get('/platform/subscriptions')
 def platform_subscriptions(x_auth_token: str | None = Header(default=None)):
     _platform_actor(x_auth_token)
+    migrated=_migrate_legacy_subscriptions()
+    if migrated:
+        _save_state()
+    # The console must always have one subscription row for every apartment account.
+    # This is also the repair path for accounts created by older V6.4/V6.5 builds.
     rows=[]
-    for sub in subscriptions.values():
+    created_missing=False
+    for account in tenant_accounts.values():
+        sub=_subscription_for_tenant(account.tenant_id)
+        if not sub:
+            sub=_create_subscription_for_tenant(account.tenant_id, account.created_at, "migration")
+            created_missing=True
         _refresh_subscription_status(sub)
-        account=tenant_accounts.get(sub.tenant_id)
-        rows.append({"subscription":sub.model_dump(),"summary":_subscription_summary(sub),"account":account.model_dump() if account else None})
+        rows.append({"subscription":sub.model_dump(),"summary":_subscription_summary(sub),"account":account.model_dump()})
+    if migrated or created_missing:
+        _save_state()
     return sorted(rows,key=lambda x:(x["summary"].get("status", ""), (x["account"] or {}).get("apartment_name", "").lower()))
 
 @app.get('/platform/accounts/{tenant_id}/subscription')
@@ -3226,9 +3343,30 @@ def platform_assign_plan(tenant_id: str, plan_id: str, x_auth_token: str | None 
     if not account: raise HTTPException(status_code=404, detail="Property account not found.")
     if not sub: raise HTTPException(status_code=404, detail="Subscription not found.")
     if not plan or not plan.active: raise HTTPException(status_code=404, detail="Active subscription plan not found.")
-    old=sub.model_copy(); sub.plan_id=plan.id; sub.subscription_type="PAID"; sub.status="PAST_DUE"; sub.payment_status="PENDING"; sub.start_date=sub.start_date or date.today().isoformat(); sub.last_reason=f"Plan assigned by Product Owner: {plan.name}"; sub.updated_at=datetime.now().isoformat(timespec="seconds")
-    _record_subscription_history(sub,actor.username,"Plan Assigned",sub.last_reason,old=old); platform_audit.append({"at":sub.updated_at,"event":"Subscription Plan Assigned","actor":actor.username,"detail":f"{account.account_id}; {plan.name}"}); _save_state()
-    return {"subscription":sub,"summary":_subscription_summary(sub)}
+    old=sub.model_copy(); now=datetime.now().isoformat(timespec="seconds")
+    is_trial=_plan_is_trial(plan)
+    sub.plan_id=plan.id
+    if is_trial:
+        duration,unit=_plan_trial_period(plan)
+        if old.plan_id == plan.id and old.subscription_type == "TRIAL" and old.trial_end_date and date.today().isoformat() <= old.trial_end_date:
+            _refresh_subscription_status(sub)
+            return {"subscription":sub,"summary":_subscription_summary(sub),"idempotent":True}
+        start=date.today().isoformat()
+        sub.subscription_type="TRIAL"; sub.status="TRIAL"; sub.payment_status="NOT_REQUIRED"
+        sub.trial_start_date=start; sub.trial_end_date=_add_period(start,duration,unit)
+        sub.start_date=None; sub.end_date=None; sub.grace_start_date=None; sub.grace_end_date=None
+        sub.last_reason=f"Trial plan assigned by Product Owner: {plan.name} ({duration} {unit})"
+    else:
+        sub.subscription_type="PAID"; sub.status="PAST_DUE"; sub.payment_status="PENDING"
+        sub.start_date=sub.start_date or date.today().isoformat(); sub.trial_start_date=None; sub.trial_end_date=None
+        sub.grace_start_date=None; sub.grace_end_date=None
+        sub.last_reason=f"Paid plan assigned by Product Owner: {plan.name}"
+    sub.updated_at=now
+    action="Trial Plan Assigned" if is_trial else "Plan Assigned"
+    _record_subscription_history(sub,actor.username,action,sub.last_reason,old=old)
+    platform_audit.append({"at":now,"event":"Trial Plan Assigned" if is_trial else "Subscription Plan Assigned","actor":actor.username,"tenant_id":tenant_id,"detail":f"{account.account_id}; {plan.name}; {sub.last_reason}"})
+    _save_state()
+    return {"subscription":sub,"summary":_subscription_summary(sub),"idempotent":False}
 
 @app.post('/platform/accounts/{tenant_id}/subscription/cancel')
 def platform_cancel_subscription(tenant_id: str, reason: str = Body(default="", embed=True), x_auth_token: str | None = Header(default=None)):
@@ -3281,24 +3419,34 @@ def platform_status():
     return {"initialized": platform_owner is not None, "version":"6.5.13", "tenant_count":len(tenant_accounts), "subscription_count":len(subscriptions)}
 
 @app.post('/platform/bootstrap')
-def platform_bootstrap(data: PlatformBootstrapInput):
+def platform_bootstrap(data: PlatformBootstrapInput, background_tasks: BackgroundTasks):
     global platform_owner, platform_owner_password, platform_password_policy_initialized
     if platform_owner is not None:
         raise HTTPException(status_code=409, detail="Product Owner is already configured.")
     now=datetime.now().isoformat(timespec='seconds')
-    platform_owner=AdminUser(id=str(uuid4()),username=data.username.strip(),full_name=data.full_name.strip(),email=data.email.strip().lower(),role="Super Admin",created_at=now,updated_at=now,force_password_change=True)
+    platform_owner=AdminUser(id=str(uuid4()),username=data.username.strip(),full_name=data.full_name.strip(),email=data.email.strip().lower(),role="Super Admin",created_at=now,updated_at=now,force_password_change=False)
     platform_owner_password=_password_hash(data.password)
     platform_password_policy_initialized=True
     token=secrets.token_urlsafe(32); platform_sessions[token]=platform_owner.id
-    sent,msg=_send_platform_welcome_email(platform_owner.email,platform_owner.full_name,platform_owner.username)
-    platform_audit.append({"at":now,"event":"Platform Initialized","actor":platform_owner.username,"detail":f"Product Owner created; {msg}"})
+    # Never make Platform Owner creation wait for SMTP. Persistence is the core
+    # operation; email delivery is optional and runs after the response is prepared.
+    email_configured=bool(os.getenv('APARTCARE_SMTP_APP_PASSWORD'))
+    email_message=("Platform Owner created. Welcome email queued for delivery." if email_configured
+                   else "Platform Owner created. Email is not configured; set APARTCARE_SMTP_APP_PASSWORD to enable delivery.")
+    if email_configured:
+        background_tasks.add_task(_send_platform_welcome_email, platform_owner.email, platform_owner.full_name, platform_owner.username)
+    platform_audit.append({"at":now,"event":"Platform Initialized","actor":platform_owner.username,"detail":email_message})
     _save_state()
-    return {"user":platform_owner,"token":token,"display_role":"Product Owner","force_password_change":True,"email_sent":sent,"email_message":msg}
+    return {"user":platform_owner,"token":token,"display_role":"Product Owner","force_password_change":False,"email_sent":None,"email_message":email_message}
 
 @app.post('/platform/login')
 def platform_login(data: AdminLoginInput):
     if platform_owner is None or data.username.lower()!=platform_owner.username.lower() or _password_hash(data.password)!=platform_owner_password:
         raise HTTPException(status_code=401, detail="Invalid Product Owner credentials.")
+    # FIX 12: normal Platform Owner creation never requires a password change.
+    # Preserve the forced flag only when it came from an explicit reset.
+    if platform_owner.force_password_change and platform_owner.created_at == platform_owner.updated_at:
+        platform_owner.force_password_change=False
     token=secrets.token_urlsafe(32); platform_sessions[token]=platform_owner.id
     platform_audit.append({"at":datetime.now().isoformat(timespec='seconds'),"event":"Product Owner Login","actor":platform_owner.username,"detail":"Success"})
     _save_state()
@@ -3329,6 +3477,9 @@ def platform_change_own_password(data: ChangePasswordInput, x_auth_token: str | 
 @app.get('/platform/accounts', response_model=list[TenantAccount])
 def platform_accounts(x_auth_token: str | None = Header(default=None)):
     _platform_actor(x_auth_token)
+    migrated=_migrate_legacy_subscriptions()
+    if migrated:
+        _save_state()
     today=date.today().isoformat()
     result=[]
     for a in tenant_accounts.values():
@@ -3364,7 +3515,7 @@ def platform_support_session_logout(x_auth_token: str | None = Header(default=No
     return {"logged_out":True,"tenant_id":session[0] if session else None}
 
 @app.post('/platform/accounts', response_model=TenantAccount, status_code=201)
-def platform_create_account(data: PlatformTenantCreateInput, x_auth_token: str | None = Header(default=None)):
+def platform_create_account(data: PlatformTenantCreateInput, background_tasks: BackgroundTasks, x_auth_token: str | None = Header(default=None)):
     _platform_actor(x_auth_token)
     if any(a.apartment_name.lower()==data.apartment_name.strip().lower() and a.city.lower()==data.city.strip().lower() for a in tenant_accounts.values()):
         raise HTTPException(status_code=409, detail="A property account with the same name and city already exists.")
@@ -3385,13 +3536,15 @@ def platform_create_account(data: PlatformTenantCreateInput, x_auth_token: str |
     _record_account_validity_history(account, "Created", platform_owner.username if platform_owner else "system", "Apartment account created by Platform Owner")
     # Universal password policy: every newly created property user starts with
     # a temporary password and must change it on first login.
-    admin=AdminUser(id=str(uuid4()),username=data.admin_username.strip(),full_name=data.admin_name.strip(),email=admin_email,mobile_no=admin_mobile,role="Admin",created_at=now,updated_at=now,tenant_id=tid,force_password_change=True)
+    admin=AdminUser(id=str(uuid4()),username=data.admin_username.strip(),full_name=data.admin_name.strip(),email=admin_email,mobile_no=admin_mobile,role="Admin",created_at=now,updated_at=now,tenant_id=tid,force_password_change=False)
     tenant_users[tid]=[admin]; tenant_passwords[admin.id]=_password_hash(data.password)
     _create_subscription_for_tenant(tid, now, platform_owner.username if platform_owner else "system")
+    if admin_email:
+        background_tasks.add_task(_send_welcome_email, account.account_id, account.apartment_name, admin.full_name, admin.username, admin_email)
     # Seed the standard utility directory inside the new tenant namespace.
     for category_name in DEFAULT_UTILITY_CATEGORIES:
         utility_categories.append(UtilityCategory(id=f"UTC-{uuid4()}",apartment_id=tid,name=category_name,active=True,created_at=now,updated_at=now,created_by="system"))
-    platform_audit.append({"at":now,"event":"Property Account Created","actor":platform_owner.username if platform_owner else "system","detail":account.account_id})
+    platform_audit.append({"at":now,"event":"Property Account Created","actor":platform_owner.username if platform_owner else "system","tenant_id":tid,"detail":account.account_id})
     _save_state()
     return account
 
@@ -3441,8 +3594,18 @@ def platform_unlock_account(tenant_id: str, reason: str = Body(default="", embed
 @app.get('/platform/accounts/{tenant_id}/validity-history', response_model=list[TenantAccountValidityHistory])
 def platform_account_validity_history(tenant_id: str, x_auth_token: str | None = Header(default=None)):
     _platform_actor(x_auth_token)
-    if tenant_id not in tenant_accounts: raise HTTPException(status_code=404, detail="Property account not found.")
-    return sorted([h for h in tenant_account_validity_history if h.tenant_id==tenant_id], key=lambda h:h.changed_at, reverse=True)
+    account=tenant_accounts.get(tenant_id)
+    if not account: raise HTTPException(status_code=404, detail="Property account not found.")
+    rows=[h for h in tenant_account_validity_history if h.tenant_id==tenant_id]
+    if not rows:
+        tenant_account_validity_history.append(TenantAccountValidityHistory(
+            id=str(uuid4()), tenant_id=account.tenant_id, account_id=account.account_id,
+            valid_from=account.valid_from, valid_to=account.valid_to, status=account.status,
+            action="Migrated Baseline", changed_at=account.created_at, changed_by="system",
+            reason="Validity history baseline created for this apartment account."))
+        _save_state()
+        rows=[h for h in tenant_account_validity_history if h.tenant_id==tenant_id]
+    return sorted(rows, key=lambda h:h.changed_at, reverse=True)
 
 
 def _purge_tenant_data(tenant_id: str) -> dict:
@@ -3523,6 +3686,8 @@ def tenant_login(data: AdminLoginInput, account_id: str):
         raise HTTPException(status_code=401, detail="Invalid User ID or password.")
     user.tenant_id=account.tenant_id
     token=secrets.token_urlsafe(32); tenant_sessions[token]=(account.tenant_id,user.id); auth_sessions[token]=user.id
+    _audit(user.username,"Success","Login",f"Tenant {account.account_id}",user.id,account.tenant_id)
+    _save_state()
     return {"user":user,"token":token,"account":account}
 
 
@@ -3594,7 +3759,14 @@ def _platform_history_rows() -> list[dict]:
         account=tenant_accounts.get(h.tenant_id) if h.tenant_id else None
         rows.append({**h.model_dump(),"scope":"Tenant","account_id":account.account_id if account else "","apartment_name":account.apartment_name if account else ""})
     for event in platform_audit:
-        rows.append({"id":f"platform-{event.get('at','')}-{event.get('event','')}","username":event.get('actor',''),"user_id":None,"tenant_id":"","status":"Success","event":event.get('event','Platform Event'),"at":event.get('at',''),"reason":event.get('detail',''),"scope":"Platform","account_id":"","apartment_name":"Platform"})
+        detail=str(event.get('detail','') or '')
+        event_tenant=str(event.get('tenant_id','') or '')
+        account=None
+        if event_tenant:
+            account=tenant_accounts.get(event_tenant)
+        if account is None:
+            account=next((a for a in tenant_accounts.values() if a.account_id and a.account_id in detail),None)
+        rows.append({"id":f"platform-{event.get('at','')}-{event.get('event','')}","username":event.get('actor',''),"user_id":None,"tenant_id":account.tenant_id if account else "","status":"Success","event":event.get('event','Platform Event'),"at":event.get('at',''),"reason":detail,"scope":"Platform","account_id":account.account_id if account else "","apartment_name":account.apartment_name if account else "Platform"})
     return rows
 
 def _history_matches(row: dict, q: str = "", account_id: str = "", user_id: str = "", event_type: str = "", from_date: str = "", to_date: str = "") -> bool:
@@ -3659,44 +3831,148 @@ def platform_login_history_purge(x_auth_token: str | None = Header(default=None)
 STATE_FILE = Path(os.getenv('APARTCARE_STATE_FILE', str(RUNTIME_DIR / 'apartcare_state.json')))
 DATABASE_URL = os.getenv('DATABASE_URL') or os.getenv('POSTGRES_URL') or os.getenv('POSTGRES_URL_NON_POOLING')
 DB_STATE_TABLE = 'apartcare_state'
+_DB_POOL = None
+_DB_TABLE_READY = False
+_DB_POOL_LOCK = threading.Lock()
+_LOCAL_DB_VERSION = 0
+_STATE_SAVED_THIS_REQUEST = contextvars.ContextVar('apartcare_state_saved_this_request', default=False)
+_STATE_RUNTIME_INITIALIZED = False
+_STATE_VERSION_CHECK_AT = 0.0
+_STATE_VERSION_CHECK_TTL = 1.0
+
+def _get_db_pool():
+    global _DB_POOL
+    if not DATABASE_URL:
+        return None
+    if _DB_POOL is not None:
+        return _DB_POOL
+    if ConnectionPool is None:
+        # Safe fallback for environments where psycopg-pool was not packaged.
+        return None
+    with _DB_POOL_LOCK:
+        if _DB_POOL is None:
+            _DB_POOL = ConnectionPool(
+                conninfo=DATABASE_URL,
+                min_size=1,
+                max_size=4,
+                timeout=4,
+                kwargs={'connect_timeout': 3, 'sslmode': 'require'},
+            )
+    return _DB_POOL
 
 def _db_connect():
     if not DATABASE_URL:
         return None
+    pool = _get_db_pool()
+    if pool is not None:
+        return pool.connection()
     return psycopg.connect(DATABASE_URL, connect_timeout=3, sslmode='require')
 
 def _ensure_db_state_table():
-    conn = _db_connect()
-    if conn is None:
+    global _DB_TABLE_READY
+    if _DB_TABLE_READY or not DATABASE_URL:
         return
-    with conn:
+    pool = _get_db_pool()
+    if pool is None:
+        conn = psycopg.connect(DATABASE_URL, connect_timeout=3, sslmode='require')
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(f"CREATE TABLE IF NOT EXISTS {DB_STATE_TABLE} (id SMALLINT PRIMARY KEY, payload JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), version BIGINT NOT NULL DEFAULT 1)")
+            _DB_TABLE_READY = True
+        finally:
+            conn.close()
+        return
+    with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(f"CREATE TABLE IF NOT EXISTS {DB_STATE_TABLE} (id SMALLINT PRIMARY KEY, payload JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), version BIGINT NOT NULL DEFAULT 1)")
-    conn.close()
+        conn.commit()
+    _DB_TABLE_READY = True
 
 def _db_load_state():
+    global _LOCAL_DB_VERSION
     _ensure_db_state_table()
-    conn = _db_connect()
+    pool = _get_db_pool()
+    if pool is not None:
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT payload, version FROM {DB_STATE_TABLE} WHERE id=1")
+                row = cur.fetchone()
+                _LOCAL_DB_VERSION = int(row[1] or 0) if row else 0
+                return row[0] if row else None
+    conn = psycopg.connect(DATABASE_URL, connect_timeout=3, sslmode='require') if DATABASE_URL else None
     if conn is None:
         return None
     try:
         with conn:
             with conn.cursor() as cur:
-                cur.execute(f"SELECT payload FROM {DB_STATE_TABLE} WHERE id=1")
+                cur.execute(f"SELECT payload, version FROM {DB_STATE_TABLE} WHERE id=1")
                 row = cur.fetchone()
+                _LOCAL_DB_VERSION = int(row[1] or 0) if row else 0
                 return row[0] if row else None
     finally:
         conn.close()
 
-def _db_save_state(data):
+def _db_state_version():
+    if not DATABASE_URL:
+        return 0
     _ensure_db_state_table()
-    conn = _db_connect()
+    pool = _get_db_pool()
+    if pool is not None:
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT version FROM {DB_STATE_TABLE} WHERE id=1")
+                row = cur.fetchone()
+                return int(row[0] or 0) if row else 0
+    conn = psycopg.connect(DATABASE_URL, connect_timeout=3, sslmode='require')
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT version FROM {DB_STATE_TABLE} WHERE id=1")
+                row = cur.fetchone()
+                return int(row[0] or 0) if row else 0
+    finally:
+        conn.close()
+
+def _refresh_state_if_changed():
+    global _LOCAL_DB_VERSION, _STATE_VERSION_CHECK_AT
+    if not DATABASE_URL:
+        return
+    now=time.monotonic()
+    # Avoid a Postgres round-trip on every GET. Writes still persist immediately;
+    # another warm Vercel instance is picked up within one second.
+    if now - _STATE_VERSION_CHECK_AT < _STATE_VERSION_CHECK_TTL:
+        return
+    _STATE_VERSION_CHECK_AT=now
+    current_version = _db_state_version()
+    if current_version != _LOCAL_DB_VERSION:
+        _load_state()
+
+def _db_save_state(data):
+    global _LOCAL_DB_VERSION
+    _ensure_db_state_table()
+    pool = _get_db_pool()
+    payload = json.dumps(data, ensure_ascii=False)
+    sql = f"INSERT INTO {DB_STATE_TABLE}(id,payload,updated_at,version) VALUES(1,%s,NOW(),1) ON CONFLICT(id) DO UPDATE SET payload=EXCLUDED.payload, updated_at=NOW(), version={DB_STATE_TABLE}.version+1 RETURNING version"
+    if pool is not None:
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (payload,))
+                row = cur.fetchone()
+            conn.commit()
+        _LOCAL_DB_VERSION = int(row[0] or 0) if row else _LOCAL_DB_VERSION
+        _STATE_SAVED_THIS_REQUEST.set(True)
+        return True
+    conn = psycopg.connect(DATABASE_URL, connect_timeout=3, sslmode='require') if DATABASE_URL else None
     if conn is None:
         return False
     try:
         with conn:
             with conn.cursor() as cur:
-                cur.execute(f"INSERT INTO {DB_STATE_TABLE}(id,payload,updated_at,version) VALUES(1,%s,NOW(),1) ON CONFLICT(id) DO UPDATE SET payload=EXCLUDED.payload, updated_at=NOW(), version={DB_STATE_TABLE}.version+1", (json.dumps(data, ensure_ascii=False),))
+                cur.execute(sql, (payload,))
+                row = cur.fetchone()
+        _LOCAL_DB_VERSION = int(row[0] or 0) if row else _LOCAL_DB_VERSION
+        _STATE_SAVED_THIS_REQUEST.set(True)
         return True
     finally:
         conn.close()
@@ -3740,6 +4016,9 @@ def _save_state():
         'tenant_accounts':{k:v.model_dump() for k,v in tenant_accounts.items()},'tenant_account_validity_history':_dump_models(tenant_account_validity_history),'tenant_users':{k:_dump_models(v) for k,v in tenant_users.items()},'tenant_passwords':tenant_passwords,'platform_audit':platform_audit,
         'subscription_settings':subscription_settings.model_dump(),'subscription_plans':{k:v.model_dump() for k,v in subscription_plans.items()},'subscriptions':{k:v.model_dump() for k,v in subscriptions.items()},'subscription_history':_dump_models(subscription_history),'subscription_events':_dump_models(subscription_events),'subscription_payments':_dump_models(subscription_payments),
         'auth_sessions':dict(auth_sessions),
+        'platform_sessions':dict(platform_sessions),
+        'tenant_sessions':{k:list(v) for k,v in tenant_sessions.items()},
+        'platform_support_sessions':{k:{'tenant_id':v[0],'user':v[1].model_dump()} for k,v in platform_support_sessions.items()},
         'session_timeout_settings':session_timeout_settings.model_dump()
     }
     if DATABASE_URL:
@@ -3748,7 +4027,7 @@ def _save_state():
         STATE_FILE.write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8')
 
 def _load_state():
-    global charge_settings,charge_history,payments,payment_month_locks,payment_lock_events,expenses,expense_lock_events,expense_deletion_history,admin_users,admin_passwords,login_history,watchmen,watchman_history,utility_categories,utility_category_history,utility_contacts,utility_contact_history,opening_balances,opening_balance_history,residents,flat_history,maintenance_rows,water_headers,platform_owner,platform_owner_password,platform_password_policy_initialized,tenant_accounts,tenant_account_validity_history,tenant_users,tenant_passwords,platform_audit,session_timeout_settings,auth_sessions,subscription_settings,subscription_plans,subscriptions,subscription_history,subscription_events,subscription_payments
+    global charge_settings,charge_history,payments,payment_month_locks,payment_lock_events,expenses,expense_lock_events,expense_deletion_history,admin_users,admin_passwords,login_history,watchmen,watchman_history,utility_categories,utility_category_history,utility_contacts,utility_contact_history,opening_balances,opening_balance_history,residents,flat_history,maintenance_rows,water_headers,platform_owner,platform_owner_password,platform_password_policy_initialized,tenant_accounts,tenant_account_validity_history,tenant_users,tenant_passwords,platform_audit,session_timeout_settings,auth_sessions,platform_sessions,tenant_sessions,platform_support_sessions,subscription_settings,subscription_plans,subscriptions,subscription_history,subscription_events,subscription_payments
     try:
         d = _db_load_state() if DATABASE_URL else (json.loads(STATE_FILE.read_text(encoding='utf-8')) if STATE_FILE.exists() else None)
         if d is None:
@@ -3767,12 +4046,16 @@ def _load_state():
         po=d.get('platform_owner'); platform_owner=AdminUser(**po) if po else None; platform_owner_password=d.get('platform_owner_password','')
         policy_present='platform_password_policy_initialized' in d
         platform_password_policy_initialized=bool(d.get('platform_password_policy_initialized',False))
-        # One-time migration for versions that predate the Platform Owner first-login password policy.
-        # Existing Platform Owners are required to change the old password once; after that the
-        # policy marker is persisted and subsequent logins do not prompt again.
-        if platform_owner and not policy_present:
-            platform_owner.force_password_change=True
-            platform_password_policy_initialized=False
+        # FIX 11: normal account creation/login does not force a password change.
+        # Clear only the Fix-10 initial-password flag (created_at == updated_at).
+        # Explicit password resets update updated_at and therefore remain forced.
+        if platform_owner and platform_owner.force_password_change and platform_owner.created_at == platform_owner.updated_at:
+            platform_owner.force_password_change=False
+            platform_password_policy_initialized=True
+        for _tid, _users in tenant_users.items():
+            for _u in _users:
+                if _u.force_password_change and _u.created_at == _u.updated_at:
+                    _u.force_password_change=False
         tenant_accounts={k:TenantAccount(**v) for k,v in d.get('tenant_accounts',{}).items()}
         # Backfill the new per-tenant operational start month without altering
         # historical transactional data or tenant identifiers.
@@ -3780,7 +4063,21 @@ def _load_state():
             locked_month=_effective_operational_start_month(_account.tenant_id)
             _account.data_start_month=locked_month
         tenant_account_validity_history=[TenantAccountValidityHistory(**x) for x in d.get('tenant_account_validity_history',[])]; tenant_users={k:[AdminUser(**u) for u in v] for k,v in d.get('tenant_users',{}).items()}; tenant_passwords=d.get('tenant_passwords',{}); platform_audit=d.get('platform_audit',[]); auth_sessions=dict(d.get('auth_sessions',{}))
-        subscription_settings=SubscriptionSettings(**d.get('subscription_settings',{})); subscription_plans={k:SubscriptionPlan(**v) for k,v in d.get('subscription_plans',{}).items()}; subscriptions={k:Subscription(**v) for k,v in d.get('subscriptions',{}).items()}; subscription_history=[SubscriptionHistory(**x) for x in d.get('subscription_history',[])]; subscription_events=[SubscriptionEvent(**x) for x in d.get('subscription_events',[])]; subscription_payments=[SubscriptionPayment(**x) for x in d.get('subscription_payments',[])]
+        platform_sessions=dict(d.get('platform_sessions',{}))
+        tenant_sessions={k:tuple(v) for k,v in d.get('tenant_sessions',{}).items()}
+        platform_support_sessions={k:(v.get('tenant_id',''),AdminUser(**v.get('user',{}))) for k,v in d.get('platform_support_sessions',{}).items() if v.get('user')}
+        # FIX 12: clear only the legacy first-login flag on persisted users.
+        # Explicit password resets change updated_at and therefore remain forced.
+        for _users in tenant_users.values():
+            for _u in _users:
+                if _u.force_password_change and _u.created_at == _u.updated_at:
+                    _u.force_password_change=False
+        subscription_settings=SubscriptionSettings(**d.get('subscription_settings',{}));
+        # A legacy Fix-10 state may have trial_enabled=True with updated_by=system.
+        # Treat that as the old implicit default, not an explicit Product Owner choice.
+        if subscription_settings.updated_by in ('','system') and not subscription_settings.updated_at:
+            subscription_settings.trial_enabled=False
+        subscription_plans={k:SubscriptionPlan(**v) for k,v in d.get('subscription_plans',{}).items()}; subscriptions={k:Subscription(**v) for k,v in d.get('subscriptions',{}).items()}; subscription_history=[SubscriptionHistory(**x) for x in d.get('subscription_history',[])]; subscription_events=[SubscriptionEvent(**x) for x in d.get('subscription_events',[])]; subscription_payments=[SubscriptionPayment(**x) for x in d.get('subscription_payments',[])]
         _default_plan_seed()
         _migrate_legacy_subscriptions()
         # Correct the legacy Telangana account code typo (TE -> TS) without
@@ -3807,17 +4104,34 @@ def _load_state():
         # requested endpoint is reached. Mutating endpoints persist explicitly.
     except Exception as e: print('ApartCare state load warning:',e)
 
+def _ensure_runtime_state_loaded():
+    """Load cloud state once per warm function and repair legacy subscriptions.
+
+    Older builds loaded the state only after import on Vercel, but also ran the
+    legacy-subscription migration before that state was loaded. Existing tenant
+    accounts could therefore appear in Apartment Accounts but have no row in
+    Subscription & Billing. This one-time bootstrap fixes that gap safely.
+    """
+    global _STATE_RUNTIME_INITIALIZED
+    if _STATE_RUNTIME_INITIALIZED or not os.getenv("VERCEL"):
+        return
+    _load_state()
+    _default_plan_seed()
+    migrated=_migrate_legacy_subscriptions()
+    if migrated:
+        _save_state()
+    _STATE_RUNTIME_INITIALIZED=True
+
 # IMPORTANT: Never load Postgres state during module import on Vercel.
-# Vercel must be able to initialize the function before any database network call.
-# Production state is loaded by load_persistent_state_before_request middleware.
+# Vercel production state is loaded by load_persistent_state_before_request.
 if not os.getenv("VERCEL"):
     _load_state()
     _default_plan_seed()
     _migrate_legacy_subscriptions()
     _save_state()
 else:
+    # Cloud state is loaded lazily on the first request.
     _default_plan_seed()
-    _migrate_legacy_subscriptions()
 
 @app.middleware("http")
 async def enforce_property_tenant_context(request, call_next):
@@ -3873,8 +4187,15 @@ async def enforce_property_tenant_context(request, call_next):
         # Subscription lifecycle is separate from Account validity. Expired/restricted
         # subscriptions can still access login, subscription and billing endpoints,
         # but operational APIs are blocked until payment/reactivation.
-        sub_path_allowed = path.startswith("/subscription")
-        if not sub_path_allowed and not _subscription_access_allowed(tenant):
+        subscription_exempt = any((
+            path.startswith("/subscription"),
+            path.startswith("/admin/users"),
+            path.startswith("/admin/history"),
+            path.startswith("/admin/login-history"),
+            path.startswith("/admin/session-timeouts"),
+            path == "/settings/apartment-photo",
+        ))
+        if not subscription_exempt and not _subscription_access_allowed(tenant):
             return JSONResponse(status_code=402, content={"detail": "ApartCare subscription is restricted. Open Subscription & Billing to restore service."})
         tenant_users_for_account = tenant_users.get(tenant, [])
         if _is_platform_support_token(token):
@@ -3934,21 +4255,23 @@ async def enforce_property_tenant_context(request, call_next):
 
 @app.middleware('http')
 async def load_persistent_state_before_request(request, call_next):
-    # In production, Vercel instances are ephemeral. Reload the authoritative
-    # application state from Postgres before each request so a warm function
-    # cannot retain another tenant's state between requests. Local development
-    # continues to use the JSON state file when DATABASE_URL is absent.
+    # FIX 11: do not reload the entire JSONB state blob on every request.
+    # Perform a lightweight version check and reload only when another Vercel
+    # instance has committed a newer state version. This keeps cloud latency
+    # low while preserving cross-instance tenant/account consistency.
     if DATABASE_URL:
         try:
-            _load_state()
+            _ensure_runtime_state_loaded()
+            _refresh_state_if_changed()
         except Exception as e:
-            print('ApartCare persistent state load warning:', e)
+            print('ApartCare persistent state refresh warning:', e)
     return await call_next(request)
 
 @app.middleware('http')
 async def persist_state_after_mutation(request, call_next):
+    _STATE_SAVED_THIS_REQUEST.set(False)
     response=await call_next(request)
-    if request.method in {'POST','PUT','PATCH','DELETE'} and response.status_code<400:
+    if request.method in {'POST','PUT','PATCH','DELETE'} and response.status_code<400 and not _STATE_SAVED_THIS_REQUEST.get():
         try: _save_state()
         except Exception as e: print('ApartCare state save warning:',e)
     return response

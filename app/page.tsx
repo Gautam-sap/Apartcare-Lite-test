@@ -1,7 +1,7 @@
 
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 type Tab = 'Dashboard' | 'Residents' | 'Monthly Maintenance' | 'Payments' | 'Expenses' | 'Utilities' | 'Reports' | 'Settings' | 'Administration' | 'Data Import' | 'Subscription & Billing';
 type Period = 'Monthly' | 'Yearly';
@@ -29,7 +29,7 @@ type Payment = {
 };
 type PaymentSummary = {month_key:string;total_maintenance:number;previous_balance:number;total_due:number;total_collected:number;total_pending:number;payment_count:number};
 type DashboardKpis = {previous_month_closing:number;total_maintenance:number;total_collected:number;total_expenses:number;current_balance:number;total_available_amount:number};
-type ChargeSettings = { tenant_id:string; apartment_id:string; account_id?:string; account_mobile?:string; apartment_name:string; address:string; city:string; pin_code:string; state:string; country:string; language:string; no_of_flats:number; no_of_flats_editable:boolean; common_maintenance:number; cca:number; watchman_salary:number; watchman_salary_locked:boolean; apartment_photo_name:string; apartment_photo_path:string; };
+type ChargeSettings = { tenant_id:string; apartment_id:string; account_id?:string; account_mobile?:string; apartment_name:string; address:string; city:string; pin_code:string; state:string; country:string; language:string; no_of_flats:number; no_of_flats_editable:boolean; common_maintenance:number; cca:number; watchman_salary:number; watchman_salary_locked:boolean; apartment_photo_name:string; apartment_photo_path:string; apartment_photo_data_url?:string; };
 type Watchman = {id:string; tenant_id:string; apartment_id:string; name:string; mobile_no:string; start_date:string; end_date:string|null; salary:number; locked:boolean; remarks:string; deleted:boolean; deleted_at:string|null; deleted_reason:string;};
 type OpeningBalance = {id:string; tenant_id:string; apartment_id:string; go_live_month:string; opening_balance:number; locked:boolean; saved_at:string;};
 type OpeningHistory = {id:string; tenant_id:string; apartment_id:string; go_live_month:string; opening_balance:number; action:string; changed_at:string; justification?:string; changed_by?:string;};
@@ -204,6 +204,18 @@ export default function Home(){
   const [platformBootstrap,setPlatformBootstrap]=useState({full_name:'Product Owner',username:'',email:'',password:''});
   const [platformAuthView,setPlatformAuthView]=useState<'login'|'forgot'|'reset'>('login');
   const [platformBusy,setPlatformBusy]=useState(false);
+  const [planCreating,setPlanCreating]=useState(false);
+  const [platformSubscriptionHistoryTenantId,setPlatformSubscriptionHistoryTenantId]=useState('');
+  const [platformSubscriptionHistory,setPlatformSubscriptionHistory]=useState<any[]>([]);
+  const platformActionLocks=useRef<Set<string>>(new Set());
+  const [platformBusyKeys,setPlatformBusyKeys]=useState<Set<string>>(new Set());
+  const isPlatformBusy=(key:string)=>platformBusyKeys.has(key);
+  const runPlatformAction=async(key:string,action:()=>Promise<void>|void)=>{
+    if(platformActionLocks.current.has(key)) return;
+    platformActionLocks.current.add(key);
+    setPlatformBusyKeys(prev=>new Set(prev).add(key));
+    try{ await action(); } finally { platformActionLocks.current.delete(key); setPlatformBusyKeys(prev=>{const next=new Set(prev);next.delete(key);return next;}); }
+  };
   const [accountBusy,setAccountBusy]=useState(false);
   const [platformForgot,setPlatformForgot]=useState({username:'',email:''});
   const [platformReset,setPlatformReset]=useState({token:'',new_password:'',confirm_password:''});
@@ -231,7 +243,9 @@ export default function Home(){
   const [platformSubscriptions,setPlatformSubscriptions]=useState<any[]>([]);
   const [platformSubscriptionSearch,setPlatformSubscriptionSearch]=useState('');
   const [platformSubscriptionMessage,setPlatformSubscriptionMessage]=useState('');
-  const [newPlanForm,setNewPlanForm]=useState({code:'',name:'',description:'',monthly_price:'',annual_price:''});
+  const [newPlanForm,setNewPlanForm]=useState({code:'',name:'',description:'',monthly_price:'',annual_price:'',trial_enabled:false,trial_value:'',trial_unit:'Days'});
+  const [platformSelectedPlanByTenant,setPlatformSelectedPlanByTenant]=useState<Record<string,string>>({});
+  const [utilityCategoryEditorOpen,setUtilityCategoryEditorOpen]=useState(false);
   const [tenantSubscription,setTenantSubscription]=useState<any|null>(null);
   const [tenantSubscriptionMessage,setTenantSubscriptionMessage]=useState('');
   const [platformValidityHistory,setPlatformValidityHistory]=useState<any[]>([]);
@@ -298,7 +312,7 @@ export default function Home(){
   const apartmentQuery=()=>{const tid=encodeURIComponent(resolvedApartmentId());return `tenant_id=${tid}&apartment_id=${tid}`;};
   const [settingsForm,setSettingsForm]=useState<ChargeSettings>({
     tenant_id:activeApartmentId,apartment_id:activeApartmentId,apartment_name:'ApartCare Lite',address:'',city:'',pin_code:'',state:'',country:'India',language:'English',no_of_flats:0,no_of_flats_editable:true,common_maintenance:750,cca:500,
-    watchman_salary:0,watchman_salary_locked:false,apartment_photo_name:'',apartment_photo_path:''
+    watchman_salary:0,watchman_salary_locked:false,apartment_photo_name:'',apartment_photo_path:'',apartment_photo_data_url:''
   });
   const [settingsLoading,setSettingsLoading]=useState(false);
   const [settingsEffectiveMonth,setSettingsEffectiveMonth]=useState(new Date().toISOString().slice(0,7));
@@ -349,13 +363,23 @@ export default function Home(){
   useEffect(()=>{
     (async()=>{
       try{
-        const r=await fetch(`${API}/api/account/status`);
-        const status=r.ok?await r.json():{initialized:false};
+        const [accountResponse,platformResponse]=await Promise.all([
+          fetch(`${API}/api/account/status`),
+          fetch(`${API}/api/platform/status`)
+        ]);
+        const status=accountResponse.ok?await accountResponse.json():{initialized:false};
         setAccountInitialized(!!status.initialized);
-        const ps=await fetch(`${API}/api/platform/status`).then(x=>x.ok?x.json():({initialized:false})).catch(()=>({initialized:false}));
+        const ps=platformResponse.ok?await platformResponse.json():({initialized:false});
         setPlatformInitialized(!!ps.initialized);
-        // Remember Account/User is intentionally account-scoped. Do not auto-load a global
-        // hint or password before the user identifies the target account.
+        // Standard "remember on this device" policy: persist only Account Number
+        // and User ID. Never persist or prefill the password in ApartCare storage.
+        try{
+          const remembered=JSON.parse(window.localStorage.getItem('apartcare_login_identity')||'null');
+          if(remembered?.account_id || remembered?.username){
+            setLoginForm(prev=>({...prev,account_id:String(remembered.account_id||''),username:String(remembered.username||'')}));
+            setRememberLogin(true);
+          }
+        }catch{}
         const raw=window.localStorage.getItem('apartcare_session');
         if(raw){
           try{
@@ -407,7 +431,7 @@ export default function Home(){
     // the previous React input instance after logout/navigation.
     setPlatformLogin({username:'',password:''});
     setPlatformBootstrap(prev=>({...prev,username:'',password:''}));
-    setPlatformMessage('');setPlatformMustChangePassword(false);setPlatformAccountSearch('');setPlatformValidityHistory([]);setPlatformHistoryTenantId('');setShowUnlockDialog(false);setOpeningEditMode(false);setUnlockJustification('');
+    setPlatformMessage('');setPlatformMustChangePassword(false);setPlatformAccountSearch('');setPlatformRecoveryProperty(null);setPlatformRecoveryTenantId('');setPlatformRecoveryAccountSearch('');setPlatformRecoveryUserSearch('');setPlatformLoginHistory([]);setPlatformValidityHistory([]);setPlatformHistoryTenantId('');setPlatformPlans([]);setPlatformSubscriptions([]);setShowUnlockDialog(false);setOpeningEditMode(false);setUnlockJustification('');
     setPlatformChangeForm({new_password:'',confirm_password:''});
     setPlatformChangeMessage('');setPlatformForgot({username:'',email:''});
     setPlatformReset({token:'',new_password:'',confirm_password:''});
@@ -460,7 +484,7 @@ export default function Home(){
   useEffect(()=>{
     if(currentUser?.tenant_id){
       const tid=String(currentUser.tenant_id);
-      setSettingsForm({tenant_id:tid,apartment_id:tid,account_id:'',account_mobile:'',apartment_name:'',address:'',city:'',pin_code:'',state:'',country:'India',language:'English',no_of_flats:0,no_of_flats_editable:true,common_maintenance:750,cca:500,watchman_salary:0,watchman_salary_locked:false,apartment_photo_name:'',apartment_photo_path:''});
+      setSettingsForm({tenant_id:tid,apartment_id:tid,account_id:'',account_mobile:'',apartment_name:'',address:'',city:'',pin_code:'',state:'',country:'India',language:'English',no_of_flats:0,no_of_flats_editable:true,common_maintenance:750,cca:500,watchman_salary:0,watchman_salary_locked:false,apartment_photo_name:'',apartment_photo_path:'',apartment_photo_data_url:''});
       setTenantDataStartMonth('');
       setOpeningBalance(null);setOpeningHistory([]);setOpeningEditMode(false);setShowUnlockDialog(false);setUnlockJustification('');
       // Bootstrap tenant-owned header/settings immediately after login so the
@@ -478,8 +502,18 @@ export default function Home(){
       if(!r.ok){const d=await r.json().catch(()=>null);setLoginError(d?.detail||'Login failed.');return;}
       const d=await r.json();if(d.account?.account_id){setAccountId(d.account.account_id); if(d.account?.tenant_id)setActiveApartmentId(d.account.tenant_id);setTenantDataStartMonth(d.account?.data_start_month||'');}
       if(rememberLogin){
-        try{window.localStorage.setItem(`apartcare_login_hint:${String(rememberScope||'unknown')}`,JSON.stringify({account_id:loginForm.account_id,username:loginForm.username,remembered:true}));const nav:any=navigator;const PasswordCredentialCtor=(window as any).PasswordCredential;if(nav.credentials?.store && typeof PasswordCredentialCtor==='function'){await nav.credentials.store(new PasswordCredentialCtor({id:loginForm.username,password:loginForm.password,name:loginForm.username})).catch(()=>{});}}catch{}
-      }else{window.localStorage.removeItem(`apartcare_login_hint:${String(rememberScope||'unknown')}`);}
+        try{
+          window.localStorage.setItem('apartcare_login_identity',JSON.stringify({
+            account_id:loginForm.account_id.trim().toUpperCase(),
+            username:loginForm.username.trim()
+          }));
+          // Standard policy: application storage contains only Account Number and User ID.
+          // Passwords are never written by ApartCare; users may use the browser's own
+          // password manager independently.
+        }catch{}
+      }else{
+        window.localStorage.removeItem('apartcare_login_identity');
+      }
       if(d.account?.tenant_id)setActiveApartmentId(String(d.account.tenant_id));
       await loadTenantSubscription(d.token);
       saveSession(d.user,d.token);
@@ -515,46 +549,60 @@ export default function Home(){
   };
   const loadPlatformRecoveryProperty=async(token:string,tenantId:string)=>{
     if(!tenantId){setPlatformRecoveryProperty(null);return;}
-    if(tenantId==='ALL'){
-      const allUsers=(platformAccounts||[]).flatMap((a:any)=>(a.users||[]).map((u:any)=>({...u,_tenant_id:a.tenant_id,_account_id:a.account_id,_apartment_name:a.apartment_name})));
-      setPlatformRecoveryProperty({tenant_id:'ALL',account_id:'ALL',apartment_name:'All Apartment Accounts',status:'Active',users:allUsers});
-      setPlatformRecoveryTenantId('ALL');
-      return;
-    }
-    const r=await fetch(`${API}/api/platform/accounts/${encodeURIComponent(tenantId)}/users`,{headers:{'X-Auth-Token':token}});
-    const d=await r.json().catch(()=>null);
-    if(r.ok){
-      setPlatformRecoveryProperty({...d.account,users:d.users||[]});
-      setPlatformRecoveryTenantId(tenantId);
-    }else{
-      setPlatformRecoveryProperty(null);
-      setPlatformMessage(d?.detail||'Unable to load selected tenant users.');
-    }
+    await runPlatformAction(`recovery-users:${tenantId}`,async()=>{
+      if(tenantId==='ALL'){
+        const allUsers=(platformAccounts||[]).flatMap((a:any)=>(a.users||[]).map((u:any)=>({...u,_tenant_id:a.tenant_id,_account_id:a.account_id,_apartment_name:a.apartment_name})));
+        setPlatformRecoveryProperty({tenant_id:'ALL',account_id:'ALL',apartment_name:'All Apartment Accounts',status:'Active',users:allUsers});
+        setPlatformRecoveryTenantId('ALL');
+        return;
+      }
+      const r=await fetch(`${API}/api/platform/accounts/${encodeURIComponent(tenantId)}/users`,{headers:{'X-Auth-Token':token}});
+      const d=await r.json().catch(()=>null);
+      if(r.ok){
+        setPlatformRecoveryProperty({...d.account,users:d.users||[]});
+        setPlatformRecoveryTenantId(tenantId);
+      }else{
+        setPlatformRecoveryProperty(null);
+        setPlatformMessage(d?.detail||'Unable to load selected tenant users.');
+      }
+    });
   };
   const loadPlatformAccounts=async(token:string)=>{
-    const r=await fetch(`${API}/api/platform/accounts`,{headers:{'X-Auth-Token':token}});
-    const d=await r.json().catch(()=>null);
-    if(!r.ok){setPlatformMessage(d?.detail||'Unable to load Apartment Accounts.');return;}
-    const accounts=Array.isArray(d)?d:[];
-    setPlatformAccounts(accounts);
-    if(accounts.length && !platformRecoveryTenantId){
-      setPlatformRecoveryTenantId(accounts[0].tenant_id);
-      await loadPlatformRecoveryProperty(token,accounts[0].tenant_id);
-    }
+    await runPlatformAction('platform-accounts-load',async()=>{
+      const r=await fetch(`${API}/api/platform/accounts`,{headers:{'X-Auth-Token':token}});
+      const d=await r.json().catch(()=>null);
+      if(!r.ok){setPlatformMessage(d?.detail||'Unable to load Apartment Accounts.');return;}
+      const accounts=Array.isArray(d)?d:[];
+      setPlatformAccounts(accounts);
+      if(accounts.length && !platformRecoveryTenantId){
+        setPlatformRecoveryTenantId(accounts[0].tenant_id);
+        void loadPlatformRecoveryProperty(token,accounts[0].tenant_id);
+      }
+    });
   };
   const platformAuditQuery=()=>{const q=new URLSearchParams();if(platformAuditSearch.trim())q.set('q',platformAuditSearch.trim());if(platformAuditAccount.trim())q.set('account_id',platformAuditAccount.trim());if(platformAuditUser.trim())q.set('user_id',platformAuditUser.trim());if(platformAuditEvent)q.set('event_type',platformAuditEvent);if(platformAuditFrom)q.set('from_date',platformAuditFrom);if(platformAuditTo)q.set('to_date',platformAuditTo);return q.toString();};
-  const loadPlatformLoginHistory=async(token:string)=>{const qs=platformAuditQuery();const r=await fetch(`${API}/api/platform/login-history${qs?`?${qs}`:''}`,{headers:{'X-Auth-Token':token}});const d=await r.json().catch(()=>null);if(!r.ok){setPlatformMessage(d?.detail||'Unable to load global Login & Audit History.');return;}setPlatformLoginHistory(Array.isArray(d)?d:[]);};
+  const loadPlatformLoginHistory=async(token:string)=>{
+    await runPlatformAction('platform-audit-load',async()=>{
+      const qs=platformAuditQuery();
+      const r=await fetch(`${API}/api/platform/login-history${qs?`?${qs}`:''}`,{headers:{'X-Auth-Token':token}});
+      const d=await r.json().catch(()=>null);
+      if(!r.ok){setPlatformMessage(d?.detail||'Unable to load global Login & Audit History.');return;}
+      setPlatformLoginHistory(Array.isArray(d)?d:[]);
+    });
+  };
   const downloadPlatformAuditHistory=async()=>{const qs=platformAuditQuery();const r=await fetch(`${API}/api/platform/login-history/download${qs?`?${qs}`:''}`,{headers:{'X-Auth-Token':platformToken}});if(!r.ok){const d=await r.json().catch(()=>null);setPlatformMessage(d?.detail||'Unable to download audit history.');return;}const blob=await r.blob();const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='ApartCare_Global_Login_Audit_History.csv';a.click();URL.revokeObjectURL(url);};
   const purgePlatformAuditHistory=async()=>{const qs=platformAuditQuery();if(!qs){setPlatformMessage('Enter at least one filter criterion before deleting audit history.');return;}if(!window.confirm(`Delete ONLY matching audit records?\n\nAccount: ${platformAuditAccount||'Any'}\nUser: ${platformAuditUser||'Any'}\nEvent: ${platformAuditEvent||'Any'}\nFrom: ${platformAuditFrom||'Any'}\nTo: ${platformAuditTo||'Any'}\nSearch: ${platformAuditSearch||'Any'}\n\nThe purge action itself will remain in the audit trail.`))return;const r=await fetch(`${API}/api/platform/login-history?${qs}`,{method:'DELETE',headers:{'X-Auth-Token':platformToken}});const d=await r.json().catch(()=>null);if(!r.ok){setPlatformMessage(d?.detail||'Unable to delete audit history.');return;}setPlatformMessage(`${d.removed||0} matching audit records deleted. The purge action was retained.`);await loadPlatformLoginHistory(platformToken);};
   const loadPlatformSubscriptions=async(token:string)=>{
-    const [sr,pr,rr]=await Promise.all([
-      fetch(`${API}/api/platform/subscription/settings`,{headers:{'X-Auth-Token':token}}),
-      fetch(`${API}/api/platform/subscription/plans`,{headers:{'X-Auth-Token':token}}),
-      fetch(`${API}/api/platform/subscriptions`,{headers:{'X-Auth-Token':token}})
-    ]);
-    const sd=await sr.json().catch(()=>null),pd=await pr.json().catch(()=>null),rd=await rr.json().catch(()=>null);
-    if(!sr.ok||!pr.ok||!rr.ok){setPlatformSubscriptionMessage(sd?.detail||pd?.detail||rd?.detail||'Unable to load Subscription & Billing.');return;}
-    setPlatformSubscriptionSettings(sd);setPlatformPlans(Array.isArray(pd)?pd:[]);setPlatformSubscriptions(Array.isArray(rd)?rd:[]);
+    await runPlatformAction('platform-subscriptions-load',async()=>{
+      const [sr,pr,rr]=await Promise.all([
+        fetch(`${API}/api/platform/subscription/settings`,{headers:{'X-Auth-Token':token}}),
+        fetch(`${API}/api/platform/subscription/plans`,{headers:{'X-Auth-Token':token}}),
+        fetch(`${API}/api/platform/subscriptions`,{headers:{'X-Auth-Token':token}})
+      ]);
+      const sd=await sr.json().catch(()=>null),pd=await pr.json().catch(()=>null),rd=await rr.json().catch(()=>null);
+      if(!sr.ok||!pr.ok||!rr.ok){setPlatformSubscriptionMessage(sd?.detail||pd?.detail||rd?.detail||'Unable to load Subscription & Billing.');return;}
+      setPlatformSubscriptionSettings(sd);setPlatformPlans(Array.isArray(pd)?pd:[]);setPlatformSubscriptions(Array.isArray(rd)?rd:[]);
+    });
   };
   const savePlatformSubscriptionSettings=async()=>{
     if(!platformToken||!platformSubscriptionSettings)return;
@@ -563,34 +611,76 @@ export default function Home(){
     const r=await fetch(`${API}/api/platform/subscription/settings`,{method:'PUT',headers:{'Content-Type':'application/json','X-Auth-Token':platformToken},body:JSON.stringify(payload)});
     const d=await r.json().catch(()=>null);
     if(!r.ok){setPlatformSubscriptionMessage(d?.detail||'Unable to save subscription settings.');return;}
-    setPlatformSubscriptionSettings(d);setPlatformSubscriptionMessage('Subscription policy saved. Existing accounts keep their current trial expiry; the new default applies to new accounts.');await loadPlatformSubscriptions(platformToken);
+    setPlatformSubscriptionSettings(d);setPlatformSubscriptionMessage('Subscription policy saved. The selected default plan applies to new accounts; Trial is optional and never assigned unless enabled.');await loadPlatformSubscriptions(platformToken);
   };
   const createPlatformPlan=async(e:React.FormEvent)=>{
     e.preventDefault();
-    if(!newPlanForm.code||!newPlanForm.name){setPlatformSubscriptionMessage('Plan Code and Plan Name are required.');return;}
-    const r=await fetch(`${API}/api/platform/subscription/plans`,{method:'POST',headers:{'Content-Type':'application/json','X-Auth-Token':platformToken},body:JSON.stringify({code:newPlanForm.code,name:newPlanForm.name,description:newPlanForm.description,monthly_price:Number(newPlanForm.monthly_price||0),annual_price:Number(newPlanForm.annual_price||0),currency:'INR',active:true,features:{Residents:true,'Monthly Maintenance':true,Payments:true,Expenses:true,Utilities:true,Reports:true,'WhatsApp Sharing':true}})});
-    const d=await r.json().catch(()=>null);
-    if(!r.ok){setPlatformSubscriptionMessage(d?.detail||'Unable to create plan.');return;}
-    setNewPlanForm({code:'',name:'',description:'',monthly_price:'',annual_price:''});setPlatformSubscriptionMessage(`${d.name} plan created.`);await loadPlatformSubscriptions(platformToken);
+    if(planCreating) return;
+    if(!platformToken){setPlatformSubscriptionMessage('Product Owner session is required.');return;}
+    if(!newPlanForm.code.trim()||!newPlanForm.name.trim()){setPlatformSubscriptionMessage('Plan Code and Plan Name are required.');return;}
+    if(newPlanForm.trial_enabled && Number(newPlanForm.trial_value||0)<1){setPlatformSubscriptionMessage('Enter a Trial Duration of at least 1.');return;}
+    setPlanCreating(true); setPlatformSubscriptionMessage('');
+    try{
+      const payload={code:newPlanForm.code.trim().toUpperCase(),name:newPlanForm.name.trim(),description:newPlanForm.description.trim(),monthly_price:Number(newPlanForm.monthly_price||0),annual_price:Number(newPlanForm.annual_price||0),currency:'INR',active:true,trial_enabled:Boolean(newPlanForm.trial_enabled),trial_value:newPlanForm.trial_enabled?Number(newPlanForm.trial_value||0):0,trial_unit:newPlanForm.trial_unit,features:{Residents:true,'Monthly Maintenance':true,Payments:true,Expenses:true,Utilities:true,Reports:true,'Data Import':true,'WhatsApp Sharing':true}};
+      const r=await fetch(`${API}/api/platform/subscription/plans`,{method:'POST',headers:{'Content-Type':'application/json','X-Auth-Token':platformToken},body:JSON.stringify(payload)});
+      const d=await r.json().catch(()=>null);
+      if(!r.ok){setPlatformSubscriptionMessage(d?.detail||`Unable to create plan (HTTP ${r.status}).`);return;}
+      setPlatformPlans(prev=>[d,...prev.filter((x:any)=>x.id!==d.id)]);
+      setNewPlanForm({code:'',name:'',description:'',monthly_price:'',annual_price:'',trial_enabled:false,trial_value:'',trial_unit:'Days'});
+      setPlatformSubscriptionMessage(`${d.name} plan created successfully${d.trial_enabled?' as a '+d.trial_value+' '+d.trial_unit+' Trial Plan':''}. It is now available for assignment to every apartment account.`);
+      setNewPlanForm({code:'',name:'',description:'',monthly_price:'',annual_price:'',trial_enabled:false,trial_value:'',trial_unit:'Days'});
+      await loadPlatformSubscriptions(platformToken);
+    }catch(err:any){
+      setPlatformSubscriptionMessage(err?.message||'Unable to create plan.');
+    }finally{setPlanCreating(false);}
+  };
+  const loadPlatformSubscriptionHistory=async(token:string,tenantId:string)=>{
+    if(!token||!tenantId)return;
+    await runPlatformAction(`subscription-history:${tenantId}`,async()=>{
+      const r=await fetch(`${API}/api/platform/accounts/${encodeURIComponent(tenantId)}/subscription`,{headers:{'X-Auth-Token':token}});
+      const d=await r.json().catch(()=>null);
+      if(!r.ok){setPlatformSubscriptionMessage(d?.detail||'Unable to load subscription history.');return;}
+      setPlatformSubscriptionHistory(Array.isArray(d?.history)?d.history:[]);
+      setPlatformSubscriptionHistoryTenantId(tenantId);
+    });
   };
   const updatePlanPrice=async(plan:any,field:'monthly_price'|'annual_price',value:string)=>{
     const r=await fetch(`${API}/api/platform/subscription/plans/${encodeURIComponent(plan.id)}`,{method:'PATCH',headers:{'Content-Type':'application/json','X-Auth-Token':platformToken},body:JSON.stringify({[field]:Number(value||0)})});
     const d=await r.json().catch(()=>null);if(!r.ok){setPlatformSubscriptionMessage(d?.detail||'Unable to update plan.');return;}setPlatformPlans(prev=>prev.map(x=>x.id===plan.id?d:x));
   };
   const platformExtendTrialFromSubscription=async(row:any)=>{
-    const value=window.prompt('Extend trial by how many Days?', '30');if(!value)return;const reason=window.prompt('Reason for trial extension?','Customer evaluation extension');if(!reason)return;
-    const r=await fetch(`${API}/api/platform/accounts/${encodeURIComponent(row.account.tenant_id)}/subscription/trial-extension`,{method:'POST',headers:{'Content-Type':'application/json','X-Auth-Token':platformToken},body:JSON.stringify({value:Number(value),unit:'Days',reason})});
-    const d=await r.json().catch(()=>null);if(!r.ok){setPlatformSubscriptionMessage(d?.detail||'Unable to extend trial.');return;}setPlatformSubscriptionMessage(`Trial extended for ${row.account.account_id}.`);await loadPlatformSubscriptions(platformToken);
+    await runPlatformAction(`trial-extension:${row.account.tenant_id}`,async()=>{
+      const value=window.prompt('Extend trial by how many Days?', '30');if(!value)return;
+      const reason=window.prompt('Reason for trial extension?','Customer evaluation extension');if(!reason)return;
+      const r=await fetch(`${API}/api/platform/accounts/${encodeURIComponent(row.account.tenant_id)}/subscription/trial-extension`,{method:'POST',headers:{'Content-Type':'application/json','X-Auth-Token':platformToken},body:JSON.stringify({value:Number(value),unit:'Days',reason})});
+      const d=await r.json().catch(()=>null);if(!r.ok){setPlatformSubscriptionMessage(d?.detail||'Unable to extend trial.');return;}
+      setPlatformSubscriptionMessage(`Trial extended for ${row.account.account_id}.`);
+      await loadPlatformSubscriptions(platformToken);
+    });
   };
   const platformGrantComplimentary=async(row:any)=>{
-    const valid=window.prompt('Complimentary validity end date (DD/MM/YYYY), or leave blank for no expiry.','');if(valid===null)return;let iso:string|undefined=undefined;if(valid.trim()){const p=valid.trim().split('/');iso=p.length===3?`${p[2]}-${p[1].padStart(2,'0')}-${p[0].padStart(2,'0')}`:valid.trim();}const reason=window.prompt('Reason for complimentary access?','Partner / demo account');if(!reason)return;
-    const r=await fetch(`${API}/api/platform/accounts/${encodeURIComponent(row.account.tenant_id)}/subscription/complimentary`,{method:'POST',headers:{'Content-Type':'application/json','X-Auth-Token':platformToken},body:JSON.stringify({valid_to:iso||null,reason})});
-    const d=await r.json().catch(()=>null);if(!r.ok){setPlatformSubscriptionMessage(d?.detail||'Unable to grant complimentary access.');return;}setPlatformSubscriptionMessage(`Complimentary access granted for ${row.account.account_id}.`);await loadPlatformSubscriptions(platformToken);
+    await runPlatformAction(`complimentary:${row.account.tenant_id}`,async()=>{
+      const valid=window.prompt('Complimentary validity end date (DD/MM/YYYY), or leave blank for no expiry.','');if(valid===null)return;
+      let iso:string|undefined=undefined;
+      if(valid.trim()){const p=valid.trim().split('/');iso=p.length===3?`${p[2]}-${p[1].padStart(2,'0')}-${p[0].padStart(2,'0')}`:valid.trim();}
+      const reason=window.prompt('Reason for complimentary access?','Partner / demo account');if(!reason)return;
+      const r=await fetch(`${API}/api/platform/accounts/${encodeURIComponent(row.account.tenant_id)}/subscription/complimentary`,{method:'POST',headers:{'Content-Type':'application/json','X-Auth-Token':platformToken},body:JSON.stringify({valid_to:iso||null,reason})});
+      const d=await r.json().catch(()=>null);if(!r.ok){setPlatformSubscriptionMessage(d?.detail||'Unable to grant complimentary access.');return;}
+      setPlatformSubscriptionMessage(`Complimentary access granted for ${row.account.account_id}.`);
+      await loadPlatformSubscriptions(platformToken);
+    });
   };
   const platformAssignPlan=async(row:any,planId:string)=>{
-    if(!planId)return;
-    const r=await fetch(`${API}/api/platform/accounts/${encodeURIComponent(row.account.tenant_id)}/subscription/assign-plan/${encodeURIComponent(planId)}`,{method:'POST',headers:{'X-Auth-Token':platformToken}});
-    const d=await r.json().catch(()=>null);if(!r.ok){setPlatformSubscriptionMessage(d?.detail||'Unable to assign plan.');return;}setPlatformSubscriptionMessage(`${d.summary?.plan?.name||'Plan'} assigned to ${row.account.account_id}. Payment remains pending until the gateway confirms it.`);await loadPlatformSubscriptions(platformToken);
+    if(!planId){setPlatformSubscriptionMessage('Select a plan before assigning it.');return;}
+    await runPlatformAction(`platform-assign-plan:${row.account.tenant_id}`,async()=>{
+      const r=await fetch(`${API}/api/platform/accounts/${encodeURIComponent(row.account.tenant_id)}/subscription/assign-plan/${encodeURIComponent(planId)}`,{method:'POST',headers:{'X-Auth-Token':platformToken}});
+      const d=await r.json().catch(()=>null);
+      if(!r.ok){setPlatformSubscriptionMessage(d?.detail||'Unable to assign plan.');return;}
+      setPlatformSubscriptionMessage(d.summary?.subscription_type==='TRIAL'?`${d.summary?.plan?.name||'Trial Plan'} assigned to ${row.account.account_id}. Trial is active through ${d.summary?.trial_end_date?formatDate(d.summary.trial_end_date):'the configured end date'}.`:`${d.summary?.plan?.name||'Plan'} assigned to ${row.account.account_id}. Payment remains pending until the gateway confirms it.`);
+      setPlatformSelectedPlanByTenant(prev=>({...prev,[row.account.tenant_id]:planId}));
+      await loadPlatformSubscriptions(platformToken);
+      await loadPlatformSubscriptionHistory(platformToken,row.account.tenant_id);
+    });
   };
   const loadTenantSubscription=async(token:string)=>{
     if(!token)return;const r=await fetch(`${API}/api/subscription`,{headers:{'X-ApartCare-Token':token}});const d=await r.json().catch(()=>null);if(r.ok){setTenantSubscription(d);setTenantSubscriptionMessage('');}else{setTenantSubscriptionMessage(d?.detail||'Unable to load subscription status.');}
@@ -600,17 +690,17 @@ export default function Home(){
   };
   const startPlatformSupport=async(tenantId:string)=>{
     if(!platformToken)return;
-    setPlatformMessage('');
-    const r=await fetch(`${API}/api/platform/accounts/${encodeURIComponent(tenantId)}/support-session`,{method:'POST',headers:{'X-Auth-Token':platformToken}});
-    const d=await r.json().catch(()=>null);
-    if(!r.ok){setPlatformMessage(d?.detail||'Unable to start Audit/Support access.');return;}
-    // Audit/Support is an ephemeral read-only property session. Do not persist it
-    // as the apartment user's normal session and always enter on Dashboard.
-    window.localStorage.removeItem('apartcare_session');
-    setPlatformSupportMode(true);setPlatformSupportAccount(d.account||null);setPlatformProperty({...d.account,users:d.users||[]});
-    setCurrentUser(d.user);setAuthToken(d.token);setActiveApartmentId(String(d.account?.tenant_id||tenantId));setAccountId(d.account?.account_id||'');setTenantDataStartMonth(d.account?.data_start_month||'');
-    setMustChangePassword(false);setLoginError('');setTab('Dashboard');
-    window.scrollTo({top:0,left:0,behavior:'instant' as ScrollBehavior});
+    await runPlatformAction(`support-session:${tenantId}`,async()=>{
+      setPlatformMessage('');
+      const r=await fetch(`${API}/api/platform/accounts/${encodeURIComponent(tenantId)}/support-session`,{method:'POST',headers:{'X-Auth-Token':platformToken}});
+      const d=await r.json().catch(()=>null);
+      if(!r.ok){setPlatformMessage(d?.detail||'Unable to start Audit/Support access.');return;}
+      window.localStorage.removeItem('apartcare_session');
+      setPlatformSupportMode(true);setPlatformSupportAccount(d.account||null);setPlatformProperty({...d.account,users:d.users||[]});
+      setCurrentUser(d.user);setAuthToken(d.token);setActiveApartmentId(String(d.account?.tenant_id||tenantId));setAccountId(d.account?.account_id||'');setTenantDataStartMonth(d.account?.data_start_month||'');
+      setMustChangePassword(false);setLoginError('');setTab('Dashboard');
+      window.scrollTo({top:0,left:0,behavior:'instant' as ScrollBehavior});
+    });
   };
   const exitPlatformSupport=async()=>{
     try{if(authToken)await fetch(`${API}/api/platform/support-session/logout`,{method:'POST',headers:{'X-ApartCare-Token':authToken}});}catch{}
@@ -648,9 +738,13 @@ export default function Home(){
       setPlatformChangeMessage('');
       if(d.email_message) setPlatformMessage(d.email_message);
       setPlatformProperty(null);
-      await loadPlatformAccounts(d.token);
-      await loadPlatformLoginHistory(d.token);
-      await loadPlatformSubscriptions(d.token);
+      // Show the Platform Owner console immediately after authentication.
+      // Account/audit/subscription data can hydrate in parallel without making
+      // the login response wait for every secondary API request/cold start.
+      // Load only the account workspace during sign-in. Billing, audit and
+      // recovery hydrate when their tabs are opened, keeping Platform Owner
+      // login responsive instead of firing several database requests at once.
+      void loadPlatformAccounts(d.token);
     }catch(err:any){
       setPlatformMessage(`Unable to contact the ApartCare backend. Please confirm the backend is running on ${API}. ${err?.message||''}`.trim());
     }finally{
@@ -686,25 +780,44 @@ export default function Home(){
     if(platformProperty?.tenant_id===tenantId) await loadPlatformProperty(platformToken,tenantId);
   };
   const platformExtendAccount=async(account:any)=>{
-    const current=account.valid_to||'';
-    const next=window.prompt(`Enter the new Account End Validity date (DD/MM/YYYY). Current end: ${formatDate(current)}`, formatDate(current));
-    if(!next)return;
-    const parts=next.trim().split('/');
-    const value=parts.length===3?`${parts[2]}-${parts[1].padStart(2,'0')}-${parts[0].padStart(2,'0')}`:next.trim();
-    if(!/^\d{4}-\d{2}-\d{2}$/.test(value)){setPlatformMessage('Invalid validity date. Use DD/MM/YYYY.');return;}
-    if(value<=current){setPlatformMessage(`New validity end date must be after ${formatDate(current)}.`);return;}
-    const r=await fetch(`${API}/api/platform/accounts/${account.tenant_id}`,{method:'PATCH',headers:{'Content-Type':'application/json','X-Auth-Token':platformToken},body:JSON.stringify({status:account.status==='Expired'?'Active':account.status,valid_to:value,reason:`Account validity extended by Platform Owner from ${formatDate(current)} to ${formatDate(value)}.`})});
-    const d=await r.json().catch(()=>null);if(!r.ok){setPlatformMessage(d?.detail||'Unable to extend account validity.');return;}
-    setPlatformMessage(`Account ${d.account_id} validity extended to ${formatDate(d.valid_to)}. New history entry recorded.`);
-    await loadPlatformAccounts(platformToken);
-    if(platformHistoryTenantId===account.tenant_id) await loadPlatformValidityHistory(platformToken,account.tenant_id);
+    await runPlatformAction(`extend-account:${account.tenant_id}`,async()=>{
+      const current=account.valid_to||'';
+      const next=window.prompt(`Enter the new Account End Validity date (DD/MM/YYYY). Current end: ${formatDate(current)}`, formatDate(current));
+      if(!next)return;
+      const parts=next.trim().split('/');
+      const value=parts.length===3?`${parts[2]}-${parts[1].padStart(2,'0')}-${parts[0].padStart(2,'0')}`:next.trim();
+      if(!/^\d{4}-\d{2}-\d{2}$/.test(value)){setPlatformMessage('Invalid validity date. Use DD/MM/YYYY.');return;}
+      if(value<=current){setPlatformMessage(`New validity end date must be after ${formatDate(current)}.`);return;}
+      const r=await fetch(`${API}/api/platform/accounts/${account.tenant_id}`,{method:'PATCH',headers:{'Content-Type':'application/json','X-Auth-Token':platformToken},body:JSON.stringify({status:account.status==='Expired'?'Active':account.status,valid_to:value,reason:`Account validity extended by Platform Owner from ${formatDate(current)} to ${formatDate(value)}.`})});
+      const d=await r.json().catch(()=>null);if(!r.ok){setPlatformMessage(d?.detail||'Unable to extend account validity.');return;}
+      setPlatformMessage(`Account ${d.account_id} validity extended to ${formatDate(d.valid_to)}. New history entry recorded.`);
+      await loadPlatformAccounts(platformToken);
+      if(platformHistoryTenantId===account.tenant_id) await loadPlatformValidityHistory(platformToken,account.tenant_id);
+    });
   };
   const platformLockAccount=async(account:any)=>{openJustificationDialog({title:`Lock Apartment Account — ${account.account_id}`,description:'The apartment and its users will be prevented from signing in until the account is unlocked. The reason is retained in validity history.',action:'platform-account',targetId:account.tenant_id,locked:true,minLength:3});};
   const platformUnlockAccount=async(account:any)=>{openJustificationDialog({title:`Unlock Apartment Account — ${account.account_id}`,description:'Unlocking restores tenant access subject to the current validity period. The reason is retained in validity history.',action:'platform-account',targetId:account.tenant_id,locked:false,minLength:3});};
   const loadPlatformValidityHistory=async(token:string,tenantId:string)=>{
-    const r=await fetch(`${API}/api/platform/accounts/${encodeURIComponent(tenantId)}/validity-history`,{headers:{'X-Auth-Token':token}});
-    const d=await r.json().catch(()=>null);if(!r.ok){setPlatformMessage(d?.detail||'Unable to load account validity history.');return;}setPlatformValidityHistory(Array.isArray(d)?d:[]);setPlatformHistoryTenantId(tenantId);
+    if(!token||!tenantId)return;
+    await runPlatformAction(`validity-history:${tenantId}`,async()=>{
+      const r=await fetch(`${API}/api/platform/accounts/${encodeURIComponent(tenantId)}/validity-history`,{headers:{'X-Auth-Token':token}});
+      const d=await r.json().catch(()=>null);
+      if(!r.ok){setPlatformMessage(d?.detail||'Unable to load account validity history.');return;}
+      setPlatformValidityHistory(Array.isArray(d)?d:[]);
+      setPlatformHistoryTenantId(tenantId);
+    });
   };
+  useEffect(()=>{
+    if(!platformUser||!platformToken)return;
+    if(platformConsoleTab==='accounts') void loadPlatformAccounts(platformToken);
+    if(platformConsoleTab==='billing') void loadPlatformSubscriptions(platformToken);
+    if(platformConsoleTab==='audit') void loadPlatformLoginHistory(platformToken);
+    if(platformConsoleTab==='recovery'){
+      void loadPlatformAccounts(platformToken);
+      if(platformRecoveryTenantId) void loadPlatformRecoveryProperty(platformToken,platformRecoveryTenantId);
+    }
+  },[platformConsoleTab,platformUser,platformToken]);
+
   const platformDeleteAccount=async(account:any)=>{
     setPlatformMessage('Permanent Apartment Account deletion is disabled in V6.4.48. Use Lock / Unlock so the account and its time history remain auditable.');
   };
@@ -731,7 +844,7 @@ export default function Home(){
       const r=await fetch(`${API}/api/account/create`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
       const d=await r.json().catch(()=>null);
       if(!r.ok){setLoginError(d?.detail||`Unable to create Apartment Account (HTTP ${r.status}).`);return;}
-      const account=d?.account;
+      const account=d?.account || d;
       if(!account?.account_id){setLoginError('Apartment Account creation returned an incomplete response. Please check the backend logs.');return;}
       clearTenantClientState();
       setAccountId(account.account_id);
@@ -751,12 +864,12 @@ export default function Home(){
   };
   const clearTenantClientState=()=>{
     setActiveApartmentId('');setAccountId('');setTenantDataStartMonth('');setTenantSubscription(null);setTenantSubscriptionMessage('');
-    setSettingsForm({tenant_id:'',apartment_id:'',account_id:'',account_mobile:'',apartment_name:'',address:'',city:'',pin_code:'',state:'',country:'India',language:'English',no_of_flats:0,no_of_flats_editable:true,common_maintenance:750,cca:500,watchman_salary:0,watchman_salary_locked:false,apartment_photo_name:'',apartment_photo_path:''});
+    setSettingsForm({tenant_id:'',apartment_id:'',account_id:'',account_mobile:'',apartment_name:'',address:'',city:'',pin_code:'',state:'',country:'India',language:'English',no_of_flats:0,no_of_flats_editable:true,common_maintenance:750,cca:500,watchman_salary:0,watchman_salary_locked:false,apartment_photo_name:'',apartment_photo_path:'',apartment_photo_data_url:''});
     setResidents([]);setMaintenanceRows([]);setSummary(null);setPayments([]);setPaymentSummary(null);setDashboardKpis(null);setWaterHeader(null);setWatchmen([]);setUtilityContacts([]);setUtilityCategories([]);setWatchmanHistory([]);setOpeningBalance(null);setOpeningHistory([]);
     setExpenses([]);setExpenseSummary(null);setExpensePaymentSummary(null);setExpenseHistory([]);setExpenseLockHistory([]);setAllFlatsReport(null);setYearlyCollectionReport(null);setYearlyExpense(null);setFlatStatement(null);setIndividualMaintenance([]);setReportFlats([]);setLoginHistory([]);setAdminUsers([]);setResidentHistory([]);setPaymentLockHistory([]);setPaymentLock(null);setPaymentForms({});setSelectedMaintenanceIds([]);setSelectedPaymentFlats([]);setEditingResidentId(null);setEditingExpenseId(null);setEditingWatchmanId(null);setEditingUtilityId(null);
     setSettingsMessage('');setUtilityMessage('');setExpenseMessage('');setPaymentMessage('');setResidentMessage('');setMaintenanceMessage('');setReportMessage('');setAdminMessage('');
   };
-  const logoutApartCare=async()=>{try{if(authToken)await fetch(`${API}/api/admin/auth/logout`,{method:'POST',headers:{'X-ApartCare-Token':authToken}});}finally{window.localStorage.removeItem('apartcare_session');clearTenantClientState();setCurrentUser(null);setAuthToken('');setUtilityEditReady(false);setLoginError('');setAuthMode('login');}};
+  const logoutApartCare=async()=>{try{if(authToken)await fetch(`${API}/api/admin/auth/logout`,{method:'POST',headers:{'X-ApartCare-Token':authToken}});}finally{window.localStorage.removeItem('apartcare_session');clearTenantClientState();setMustChangePassword(false);setCurrentUser(null);setAuthToken('');setUtilityEditReady(false);setLoginError('');try{const remembered=JSON.parse(window.localStorage.getItem('apartcare_login_identity')||'null');if(remembered?.account_id||remembered?.username){setLoginForm({account_id:String(remembered.account_id||''),username:String(remembered.username||''),password:''});setRememberLogin(true);}else{setLoginForm({account_id:'',username:'',password:''});setRememberLogin(false);}}catch{setLoginForm({account_id:'',username:'',password:''});}setAuthMode('login');}};
   useEffect(()=>{
     const raw=typeof window!=='undefined'?window.localStorage.getItem('apartcare_session'):null;
     if(!raw)return;
@@ -908,7 +1021,7 @@ export default function Home(){
     try{
       const r=await fetch(url,{method,headers:{'Content-Type':'application/json','X-ApartCare-Token':token},body:JSON.stringify({tenant_id:resolvedApartmentId(),apartment_id:resolvedApartmentId(),name})});
       const d=await r.json().catch(()=>null); if(r.status===401){handleSessionExpired('Your login session has expired. Please log in again.');return;} if(!r.ok) throw new Error(d?.detail||'Unable to save utility category.');
-      setUtilityCategoryName('');setEditingUtilityCategoryId(null);setUtilityMessage(editingUtilityCategoryId?'Utility category updated successfully.':'Utility category added successfully.');await loadUtilityContacts();
+      setUtilityCategoryName('');setEditingUtilityCategoryId(null);setUtilityCategoryEditorOpen(false);setUtilityMessage(editingUtilityCategoryId?'Utility category updated successfully.':'Utility category added successfully.');await loadUtilityContacts();
     }catch(e:any){setUtilityMessage(e?.message||'Unable to save utility category.');}
   };
   const deactivateUtilityCategory=async(id:string)=>{
@@ -1352,7 +1465,22 @@ export default function Home(){
   const saveAdminUser=async(e:React.FormEvent)=>{e.preventDefault();setAdminMessage('');const r=await fetch(`${API}/api/admin/users`,{method:'POST',headers:{'Content-Type':'application/json','X-ApartCare-Token':authToken},body:JSON.stringify(adminForm)});if(!r.ok){const d=await r.json().catch(()=>null);setAdminMessage(d?.detail||'Unable to create user.');return;}setAdminMessage('User created successfully. A welcome email has been queued for the registered email address.');setAdminForm({username:'',full_name:'',email:'',mobile_no:'',role:'Viewer',password:''});await loadAdmin();};
   const updateAdminUser=async(id:string,patch:any)=>{const r=await fetch(`${API}/api/admin/users/${id}`,{method:'PUT',headers:{'Content-Type':'application/json','X-ApartCare-Token':authToken},body:JSON.stringify(patch)});if(!r.ok){const d=await r.json().catch(()=>null);setAdminMessage(d?.detail||'Unable to update user.');return;}await loadAdmin();};
   const resetAdminPassword=async(id:string)=>{const p=window.prompt('Enter new password (minimum 8 characters):');if(!p)return;const r=await fetch(`${API}/api/admin/users/${id}/reset-password`,{method:'POST',headers:{'Content-Type':'application/json','X-ApartCare-Token':authToken},body:JSON.stringify({new_password:p,force_change:true})});if(!r.ok){const d=await r.json().catch(()=>null);setAdminMessage(d?.detail||'Unable to reset password.');return;}setAdminMessage('Temporary password set. The user must change it at next login.');await loadAdmin();};
-  const uploadApartmentPhoto=async(file:File)=>{if(!['image/jpeg','image/png','image/webp'].includes(file.type)){setSettingsMessage('Use JPG, PNG or WEBP for the apartment profile photo.');return;}if(file.size>5*1024*1024){setSettingsMessage('Apartment profile photo must be 5 MB or smaller.');return;}const reader=new FileReader();reader.onload=async()=>{const r=await fetch(`${API}/api/settings/apartment-photo`,{method:'POST',headers:{'Content-Type':'application/json','X-ApartCare-Token':authToken},body:JSON.stringify({tenant_id:resolvedApartmentId(),apartment_id:resolvedApartmentId(),photo_name:file.name,photo_data_url:String(reader.result)})});if(!r.ok){const d=await r.json().catch(()=>null);setSettingsMessage(d?.detail||'Unable to upload photo.');return;}const data=await r.json();setSettingsForm(data);setSettingsMessage('Apartment profile photo saved.');};reader.readAsDataURL(file);};
+  const uploadApartmentPhoto=async(file:File)=>{
+    if(!['image/jpeg','image/png','image/webp'].includes(file.type)){setSettingsMessage('Use JPG, PNG or WEBP for the apartment profile photo.');return;}
+    if(file.size>5*1024*1024){setSettingsMessage('Apartment profile photo must be 5 MB or smaller.');return;}
+    setSettingsLoading(true);setSettingsMessage('Uploading apartment profile photo…');
+    try{
+      const reader=new FileReader();
+      const dataUrl=await new Promise<string>((resolve,reject)=>{reader.onload=()=>resolve(String(reader.result||''));reader.onerror=()=>reject(new Error('Unable to read the selected image.'));reader.readAsDataURL(file);});
+      const token=await getValidatedPropertyToken();
+      if(!token)throw new Error('Login session is required. Please log in again.');
+      const r=await fetch(`${API}/api/settings/apartment-photo`,{method:'POST',headers:{'Content-Type':'application/json','X-ApartCare-Token':token},body:JSON.stringify({tenant_id:resolvedApartmentId(),apartment_id:resolvedApartmentId(),photo_name:file.name,photo_data_url:dataUrl})});
+      const d=await r.json().catch(()=>null);
+      if(!r.ok)throw new Error(d?.detail||`Unable to upload photo (HTTP ${r.status}).`);
+      setSettingsForm(d);setSettingsMessage('Apartment profile photo saved successfully.');
+    }catch(e:any){setSettingsMessage(e?.message||'Unable to upload photo.');}
+    finally{setSettingsLoading(false);}
+  };
 
   useEffect(()=>{ if(tab==='Payments'){ loadPayments(false); loadPaymentLock(); } },[tab,paymentMonth]);
   useEffect(()=>{ if(tab==='Expenses'){ resetExpenseForm(); loadExpenses(false,expenseMonth); loadYearlyExpenses(expenseYear); } },[tab,expenseMonth]);
@@ -1653,14 +1781,20 @@ export default function Home(){
       html,body{width:100%!important;max-width:100%!important;margin:0!important;padding:0!important;overflow-x:hidden!important}
       .platform-owner-auth-shell{width:100%!important;max-width:100%!important;box-sizing:border-box!important;overflow-x:hidden!important}
       .platform-owner-auth-shell .auth-card,.platform-owner-auth-shell .platform-owner-console{box-sizing:border-box!important;width:100%!important;max-width:1040px!important;min-width:0!important}
-      .platform-owner-auth-shell .auth-brand{min-width:0!important;width:100%!important;box-sizing:border-box!important}
+      .platform-owner-auth-shell .auth-brand{display:flex!important;flex-direction:row!important;align-items:center!important;justify-content:flex-start!important;gap:20px!important;width:100%!important;min-width:0!important;box-sizing:border-box!important;padding:0 0 22px!important;margin:0 0 22px!important;border-bottom:1px solid #dbe4ef!important}
+      .platform-owner-auth-shell .auth-logo{width:108px!important;height:76px!important;display:flex!important;align-items:center!important;justify-content:center!important;flex:0 0 108px!important;border-radius:14px!important;background:#fff!important;border:1px solid #dbe4ef!important;overflow:hidden!important;box-shadow:0 6px 18px rgba(23,43,77,.08)!important;padding:4px!important}
+      .platform-owner-auth-shell .auth-logo img{display:block!important;width:100%!important;height:100%!important;max-width:100%!important;max-height:100%!important;object-fit:contain!important}
+      .platform-owner-auth-shell .auth-brand-copy{min-width:0!important;display:flex!important;flex-direction:column!important;gap:3px!important}
+      .platform-owner-auth-shell .auth-brand-copy h1{margin:0 0 3px!important;font-size:32px!important;line-height:1.1!important;color:#172b4d!important;font-weight:850!important;letter-spacing:-.03em!important}
+      .platform-owner-auth-shell .auth-brand-copy p{margin:0!important;font-size:16px!important;color:#315f96!important;font-weight:750!important}
+      .platform-owner-auth-shell .auth-brand-copy em{margin:0!important;font-style:normal!important;color:#0f8a5f!important;font-weight:650!important}
       .platform-owner-auth-shell .auth-brand>div:last-child{min-width:0!important}
       .platform-owner-auth-shell .auth-brand h1,.platform-owner-auth-shell .auth-brand p,.platform-owner-auth-shell .auth-brand em{overflow-wrap:anywhere!important}
       .platform-owner-auth-shell .auth-form{box-sizing:border-box!important;width:100%!important;min-width:0!important}
       .platform-owner-auth-shell .auth-form .password-field{box-sizing:border-box!important;min-width:0!important;width:100%!important}
       .platform-owner-auth-shell .auth-form .password-toggle{height:46px!important;min-height:46px!important;max-height:46px!important;display:flex!important;align-items:center!important;justify-content:center!important;box-sizing:border-box!important;border:1px solid #c8d7e7!important;border-radius:11px!important;background:#edf4ff!important;color:#172b4d!important;font-size:18px!important;line-height:1!important;padding:0!important;cursor:pointer!important;box-shadow:0 2px 6px rgba(23,43,77,.06)!important}
       .platform-owner-auth-shell .auth-form .password-toggle:hover{background:#e2edff!important;border-color:#9dbbe8!important}
-      @media(max-width:760px){.platform-owner-auth-shell{padding:14px!important}.platform-owner-auth-shell .auth-card{width:100%!important;max-width:none!important}.platform-owner-auth-shell .auth-brand{gap:14px!important}.platform-owner-auth-shell .auth-form{padding:16px!important}}.platform-owner-auth-shell .platform-owner-console{margin:0 auto!important;overflow:hidden!important;border:1px solid #d5e2ef!important;border-radius:24px!important;background:rgba(255,255,255,.96)!important;box-shadow:0 24px 60px rgba(15,39,66,.22)!important}.platform-owner-auth-shell .platform-auth-heading{display:flex;align-items:center;gap:16px;margin:-28px -28px 24px;padding:22px 28px;background:linear-gradient(135deg,#102b4d,#1f4d78);color:#fff;border-bottom:4px solid #4e86d9}.platform-owner-auth-shell .platform-auth-heading img{width:64px;height:64px;object-fit:contain;background:#fff;border-radius:16px;padding:6px}.platform-owner-auth-shell .platform-auth-heading h2{margin:0;color:#fff!important;font-size:1.65rem!important}.platform-owner-auth-shell .platform-auth-heading p{margin:3px 0 0;color:#dbeafe;font-size:.9rem}.platform-owner-auth-shell .auth-form{padding:20px!important;border:1px solid #d8e3ee!important;border-radius:18px!important;background:linear-gradient(145deg,#fbfdff,#f4f8fc)!important;box-shadow:0 12px 28px rgba(38,56,78,.07)!important}.platform-owner-auth-shell .auth-form label{gap:7px!important;color:#334e6f!important;font-weight:800!important}.platform-owner-auth-shell .auth-form input{min-height:46px!important;border:1px solid #c8d7e7!important;border-radius:11px!important;background:#fff!important;box-shadow:inset 0 1px 2px rgba(15,23,42,.03)!important}.platform-owner-auth-shell .auth-form input:focus{border-color:#4e86d9!important;box-shadow:0 0 0 3px rgba(78,134,217,.14)!important;outline:none!important}.platform-owner-auth-shell .auth-primary-button{min-height:44px!important}.platform-owner-auth-shell .auth-secondary-button,.platform-owner-auth-shell .auth-back-button{margin-top:10px!important}
+      @media(max-width:1200px){.dashboard-kpis{grid-template-columns:repeat(3,minmax(0,1fr))!important}}@media(max-width:700px){.dashboard-kpis{grid-template-columns:repeat(2,minmax(0,1fr))!important}}@media(max-width:460px){.dashboard-kpis{grid-template-columns:1fr!important}}@media(max-width:760px){.platform-owner-auth-shell{padding:14px!important}.platform-owner-auth-shell .auth-card{width:100%!important;max-width:none!important}.platform-owner-auth-shell .auth-brand{gap:14px!important}.platform-owner-auth-shell .auth-form{padding:16px!important}}.platform-owner-auth-shell .platform-owner-console{margin:0 auto!important;overflow:hidden!important;border:1px solid #d5e2ef!important;border-radius:24px!important;background:rgba(255,255,255,.96)!important;box-shadow:0 24px 60px rgba(15,39,66,.22)!important}.platform-owner-auth-shell .platform-auth-heading{display:flex;align-items:center;gap:16px;margin:-28px -28px 24px;padding:22px 28px;background:linear-gradient(135deg,#102b4d,#1f4d78);color:#fff;border-bottom:4px solid #4e86d9}.platform-owner-auth-shell .platform-auth-heading img{width:64px;height:64px;object-fit:contain;background:#fff;border-radius:16px;padding:6px}.platform-owner-auth-shell .platform-auth-heading h2{margin:0;color:#fff!important;font-size:1.65rem!important}.platform-owner-auth-shell .platform-auth-heading p{margin:3px 0 0;color:#dbeafe;font-size:.9rem}.platform-owner-auth-shell .auth-form{padding:20px!important;border:1px solid #d8e3ee!important;border-radius:18px!important;background:linear-gradient(145deg,#fbfdff,#f4f8fc)!important;box-shadow:0 12px 28px rgba(38,56,78,.07)!important}.platform-owner-auth-shell .auth-form label{gap:7px!important;color:#334e6f!important;font-weight:800!important}.platform-owner-auth-shell .auth-form input{min-height:46px!important;border:1px solid #c8d7e7!important;border-radius:11px!important;background:#fff!important;box-shadow:inset 0 1px 2px rgba(15,23,42,.03)!important}.platform-owner-auth-shell .auth-form input:focus{border-color:#4e86d9!important;box-shadow:0 0 0 3px rgba(78,134,217,.14)!important;outline:none!important}.platform-owner-auth-shell .auth-primary-button{min-height:44px!important}.platform-owner-auth-shell .auth-secondary-button,.platform-owner-auth-shell .auth-back-button{margin-top:10px!important}
       .platform-owner-auth-shell .auth-form{max-width:880px!important;margin:0 auto!important;grid-template-columns:minmax(0,1fr) minmax(280px,360px)!important;gap:18px!important}
       .platform-owner-auth-shell .auth-form input{max-width:100%!important;box-sizing:border-box!important}
       .platform-owner-auth-shell .auth-form .form-actions{grid-column:1/-1!important}
@@ -1692,7 +1826,7 @@ export default function Home(){
       .panel,.form-panel,.table-panel,.period-panel,.water-box{border:1px solid var(--line);box-shadow:0 10px 26px rgba(51,65,85,.06);border-radius:16px;background:rgba(255,255,255,.92)}
       button,.button-link{border-radius:10px!important;transition:transform .18s ease,box-shadow .18s ease,filter .18s ease!important;box-shadow:0 5px 14px rgba(59,104,184,.14)} button:hover:not(:disabled),.button-link:hover{transform:translateY(-2px);filter:brightness(1.03);box-shadow:0 9px 20px rgba(59,104,184,.20)}
       .sidebar button{border-radius:10px!important;margin:3px 6px;width:calc(100% - 12px);text-align:left}.sidebar button.active{background:linear-gradient(90deg,#3d67b4,#527bc8)!important;color:#fff;box-shadow:0 8px 18px rgba(26,53,104,.35)}
-      .premium-kpis{gap:20px}.kpi-card{position:relative;overflow:hidden;min-height:128px;border-left:5px solid var(--accent);background:linear-gradient(135deg,var(--soft),#fff)!important;box-shadow:0 10px 24px rgba(51,65,85,.10)}.kpi-card .value{font-size:2.05rem;font-weight:800;color:#344054;position:relative;z-index:2}.kpi-card .label{position:relative;z-index:2;font-weight:700}.kpi-glow{position:absolute;width:110px;height:110px;border-radius:50%;right:-35px;bottom:-45px;background:var(--accent);opacity:.10}.kpi-1{--accent:#6b4e9b;--soft:#f3effa}.kpi-2{--accent:#19726a;--soft:#edf8f6}.kpi-3{--accent:#315f96;--soft:#eef4fb}.kpi-4{--accent:#b47712;--soft:#fff7e8}.kpi-5{--accent:#2e7d4e;--soft:#eef9f1}.kpi-6{--accent:#7b5ea7;--soft:#f5f1fb}
+      .premium-kpis{gap:20px}.dashboard-kpis{display:grid!important;grid-template-columns:repeat(6,minmax(0,1fr))!important;gap:14px!important;align-items:stretch!important}.dashboard-kpis .kpi-card{min-width:0!important}.kpi-card{position:relative;overflow:hidden;min-height:128px;border-left:5px solid var(--accent);background:linear-gradient(135deg,var(--soft),#fff)!important;box-shadow:0 10px 24px rgba(51,65,85,.10)}.kpi-card .value{font-size:2.05rem;font-weight:800;color:#344054;position:relative;z-index:2}.kpi-card .label{position:relative;z-index:2;font-weight:700}.kpi-glow{position:absolute;width:110px;height:110px;border-radius:50%;right:-35px;bottom:-45px;background:var(--accent);opacity:.10}.kpi-1{--accent:#6b4e9b;--soft:#f3effa}.kpi-2{--accent:#19726a;--soft:#edf8f6}.kpi-3{--accent:#315f96;--soft:#eef4fb}.kpi-4{--accent:#b47712;--soft:#fff7e8}.kpi-5{--accent:#2e7d4e;--soft:#eef9f1}.kpi-6{--accent:#7b5ea7;--soft:#f5f1fb}
       .two-donuts{grid-template-columns:repeat(2,minmax(0,1fr));gap:26px}.premium-donut-panel{min-height:470px;padding:26px}.premium-donut-panel h2{margin:0 0 16px}.premium-donut-row{display:flex;align-items:center;justify-content:center;gap:38px;min-height:380px}.premium-donut-chart{width:330px;height:330px;border-radius:50%;position:relative;box-shadow:inset 0 0 0 1px rgba(255,255,255,.6)}.premium-hole{position:absolute;inset:88px;border-radius:50%;background:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;box-shadow:0 2px 18px rgba(15,23,42,.08)}.premium-hole strong{font-size:1.35rem}.premium-hole span{font-size:.85rem;color:#64748b;margin-top:5px}.premium-legend{display:grid;gap:13px;min-width:170px}.premium-legend div{display:grid;grid-template-columns:14px 1fr auto;align-items:center;gap:9px}.premium-legend span{width:14px;height:14px;border-radius:3px}.premium-legend b{font-weight:600}.premium-legend small{color:#64748b;font-weight:700}
       .auth-widget,.auth-card,.platform-card{box-shadow:0 14px 34px rgba(51,65,85,.12)}
       /* V6.2.1 — Global ApartCare action-button standard: primary actions match Login */
@@ -2225,16 +2359,16 @@ button{cursor:pointer}
       @media(max-width:900px){.platform-owner-auth-shell .platform-recovery-toolbar{grid-template-columns:1fr 1fr!important}.platform-owner-auth-shell .platform-recovery-toolbar button{grid-column:1/-1!important;width:max-content!important}.platform-owner-auth-shell .platform-recovery-summary{grid-template-columns:repeat(2,minmax(0,1fr))!important}}
       @media(max-width:600px){.platform-owner-auth-shell .platform-recovery-panel{padding:16px!important}.platform-owner-auth-shell .recovery-page-hero{align-items:flex-start!important;flex-wrap:wrap!important}.platform-owner-auth-shell .platform-recovery-toolbar{grid-template-columns:1fr!important}.platform-owner-auth-shell .platform-recovery-toolbar button{grid-column:auto!important;width:100%!important}.platform-owner-auth-shell .platform-recovery-summary{grid-template-columns:1fr!important}.platform-owner-auth-shell .platform-recovery-user-toolbar{grid-template-columns:1fr!important}}
 `}</style>
-        <div className="auth-brand"><div className="auth-logo">🛡️</div><div><h1>ApartCare Lite Platform</h1><p>Product Owner Administration</p><em>Tenant recovery, account oversight and controlled security actions.</em></div></div>
+        {!platformUser&&<div className="auth-brand"><div className="auth-logo"><img src="/apartcare-lite-logo.png" alt="ApartCare Lite"/></div><div className="auth-brand-copy"><h1>ApartCare Lite Platform</h1><p>Product Owner Administration</p><em>Tenant recovery, account oversight and controlled security actions.</em></div></div>}
         {platformUser?<>
       {platformMustChangePassword&&<div className="modal-backdrop"><section className="password-modal password-modal-branded"><div className="password-modal-brand"><img className="po-brand-image" src="/apartcare-lite-logo.png" alt="ApartCare Lite"/><div className="password-modal-brand-copy"><strong>ApartCare Lite</strong><span>Your daily partner in property care.</span><em>Helping you run your building beautifully.</em></div></div><div className="modal-icon">🔐</div><h2>Change your Platform Owner password</h2><p>For security, the Platform Owner must set a new password before continuing. This requirement remains active until the password is changed.</p>{platformChangeMessage&&<div className="message">{platformChangeMessage}</div>}<form onSubmit={changePlatformPassword}><label>New Password<div className="password-field"><input required minLength={8} type={showPassword?'text':'password'} value={platformChangeForm.new_password} onChange={e=>setPlatformChangeForm({...platformChangeForm,new_password:e.target.value})}/><button type="button" className="password-toggle" onClick={()=>setShowPassword(!showPassword)}>{showPassword?'🙈':'👁️'}</button></div></label><label>Confirm New Password<div className="password-field"><input required minLength={8} type={showConfirmPassword?'text':'password'} value={platformChangeForm.confirm_password} onChange={e=>setPlatformChangeForm({...platformChangeForm,confirm_password:e.target.value})}/><button type="button" className="password-toggle" onClick={()=>setShowConfirmPassword(!showConfirmPassword)}>{showConfirmPassword?'🙈':'👁️'}</button></div></label><div className="form-actions"><button type="submit" className="auth-primary-button" disabled={platformBusy}>{platformBusy?'Updating Password…':'Update Password & Continue'}</button></div></form></section></div>}
           <header className="po-top-header">
             <div className="po-brand-block">
               <div className="po-logo"><img src="/apartcare-lite-logo.png" alt="ApartCare Lite"/></div>
               <div>
-                <div className="po-brand-line"><span>ApartCare Lite</span></div>
-                <div className="po-console-label">Your daily partner in property care.</div>
-                <div className="po-console-tagline">Helping you run your building beautifully.</div>
+                <div className="po-brand-line"><span>ApartCare Lite Platform</span></div>
+                <div className="po-console-label">Product Owner Administration</div>
+                <div className="po-console-tagline">Tenant recovery, account oversight and controlled security actions.</div>
               </div>
             </div>
             <div className="po-user-meta">
@@ -2259,13 +2393,13 @@ button{cursor:pointer}
             {platformSubscriptionMessage&&<div className="message subscription-message">{platformSubscriptionMessage}</div>}
             {platformSubscriptionSettings&&<>
               <div className="subscription-policy-grid">
-                <div className="subscription-policy-card"><span>Free / Trial</span><strong>{platformSubscriptionSettings.trial_enabled?'Enabled':'Disabled'}</strong><small>Applied only to new Apartment Accounts</small></div>
+                <div className="subscription-policy-card"><span>Free / Trial</span><strong>{platformSubscriptionSettings.trial_enabled?'Enabled':'Disabled'}</strong><small>Optional — only when explicitly enabled by the Product Owner</small></div>
                 <div className="subscription-policy-card"><span>Default Trial</span><strong>{platformSubscriptionSettings.default_trial_value} {platformSubscriptionSettings.default_trial_unit}</strong><small>Starts from Account Creation Date</small></div>
                 <div className="subscription-policy-card"><span>Grace Period</span><strong>{platformSubscriptionSettings.default_grace_value} {platformSubscriptionSettings.default_grace_unit}</strong><small>After trial expiry / payment issue</small></div>
                 <div className="subscription-policy-card"><span>Complimentary</span><strong>{platformSubscriptionSettings.allow_complimentary?'Allowed':'Disabled'}</strong><small>Product Owner controlled</small></div>
               </div>
               <div className="subscription-settings-form">
-                <label className="checkbox-inline"><input type="checkbox" checked={Boolean(platformSubscriptionSettings.trial_enabled)} onChange={e=>setPlatformSubscriptionSettings({...platformSubscriptionSettings,trial_enabled:e.target.checked})}/> Enable Trial for new accounts</label>
+                <label className="checkbox-inline"><input type="checkbox" checked={Boolean(platformSubscriptionSettings.trial_enabled)} onChange={e=>setPlatformSubscriptionSettings({...platformSubscriptionSettings,trial_enabled:e.target.checked})}/> Enable Trial for new accounts (optional)</label><label>Default Plan for New Accounts<select value={platformSubscriptionSettings.default_plan_id||''} onChange={e=>setPlatformSubscriptionSettings({...platformSubscriptionSettings,default_plan_id:e.target.value})}><option value="">Select Default Plan</option>{platformPlans.filter((p:any)=>p.active).map((p:any)=><option key={p.id} value={p.id}>{p.name}{p.trial_enabled?` — Trial ${p.trial_value} ${p.trial_unit}`:` — ₹${Number(p.monthly_price).toLocaleString('en-IN')}/mo`}</option>)}</select><small className="help-text">New accounts inherit this plan unless the Product Owner assigns another plan.</small></label>
                 <label>Trial Duration<input type="number" min="1" value={platformSubscriptionSettings.default_trial_value===0?'':platformSubscriptionSettings.default_trial_value} onChange={e=>setPlatformSubscriptionSettings({...platformSubscriptionSettings,default_trial_value:e.target.value===''?0:Number(e.target.value)})}/></label>
                 <label>Unit<select value={platformSubscriptionSettings.default_trial_unit} onChange={e=>setPlatformSubscriptionSettings({...platformSubscriptionSettings,default_trial_unit:e.target.value})}><option>Days</option><option>Months</option></select></label>
                 <label>Grace Period<input type="number" min="0" value={platformSubscriptionSettings.default_grace_value===0?'':platformSubscriptionSettings.default_grace_value} onChange={e=>setPlatformSubscriptionSettings({...platformSubscriptionSettings,default_grace_value:e.target.value===''?0:Number(e.target.value)})}/></label>
@@ -2278,10 +2412,14 @@ button{cursor:pointer}
               </div>
             </>}
             <div className="subscription-plan-header"><div><h3>Plans</h3><p className="help-text">Prices are Product Owner controlled. Gateway charging remains server-side and tenant-isolated.</p></div></div>
-            <div className="subscription-plan-grid">{platformPlans.map(plan=><article className="subscription-plan-card" key={plan.id}><div className="plan-top"><span>{plan.name}</span><b>{plan.active?'ACTIVE':'INACTIVE'}</b></div><p>{plan.description}</p><label>Monthly ₹<input type="number" min="0" value={plan.monthly_price} onChange={e=>updatePlanPrice(plan,'monthly_price',e.target.value)}/></label><label>Annual ₹<input type="number" min="0" value={plan.annual_price} onChange={e=>updatePlanPrice(plan,'annual_price',e.target.value)}/></label><small>{Object.entries(plan.features||{}).filter(([,v])=>v).map(([k])=>k).join(' • ')}</small></article>)}</div>
-            <form className="subscription-new-plan" onSubmit={createPlatformPlan}><h3>Create New Plan</h3><input placeholder="Plan Code" value={newPlanForm.code} onChange={e=>setNewPlanForm({...newPlanForm,code:e.target.value.toUpperCase()})}/><input placeholder="Plan Name" value={newPlanForm.name} onChange={e=>setNewPlanForm({...newPlanForm,name:e.target.value})}/><input placeholder="Description" value={newPlanForm.description} onChange={e=>setNewPlanForm({...newPlanForm,description:e.target.value})}/><input type="number" min="0" placeholder="Monthly ₹" value={newPlanForm.monthly_price} onChange={e=>setNewPlanForm({...newPlanForm,monthly_price:e.target.value})}/><input type="number" min="0" placeholder="Annual ₹" value={newPlanForm.annual_price} onChange={e=>setNewPlanForm({...newPlanForm,annual_price:e.target.value})}/><button type="submit">＋ Create Plan</button></form>
+            <div className="subscription-plan-grid">{platformPlans.map(plan=><article className="subscription-plan-card" key={plan.id}><div className="plan-top"><span>{plan.name}</span><b>{plan.active?'ACTIVE':'INACTIVE'}</b></div><p>{plan.description}</p><label>Monthly ₹<input type="number" min="0" value={plan.monthly_price} onChange={e=>setPlatformPlans(prev=>prev.map((x:any)=>x.id===plan.id?{...x,monthly_price:Number(e.target.value||0)}:x))} onBlur={e=>updatePlanPrice({...plan,monthly_price:Number(e.target.value||0)},'monthly_price',e.target.value)}/></label><label>Annual ₹<input type="number" min="0" value={plan.annual_price} onChange={e=>setPlatformPlans(prev=>prev.map((x:any)=>x.id===plan.id?{...x,annual_price:Number(e.target.value||0)}:x))} onBlur={e=>updatePlanPrice({...plan,annual_price:Number(e.target.value||0)},'annual_price',e.target.value)}/></label><small>{Object.entries(plan.features||{}).filter(([,v])=>v).map(([k])=>k).join(' • ')}</small></article>)}</div>
+            <form className="subscription-new-plan" onSubmit={createPlatformPlan}><h3>Create New Plan</h3><input placeholder="Plan Code" value={newPlanForm.code} onChange={e=>setNewPlanForm({...newPlanForm,code:e.target.value.toUpperCase()})}/><input placeholder="Plan Name" value={newPlanForm.name} onChange={e=>setNewPlanForm({...newPlanForm,name:e.target.value})}/><input placeholder="Description" value={newPlanForm.description} onChange={e=>setNewPlanForm({...newPlanForm,description:e.target.value})}/><input type="number" min="0" placeholder="Monthly ₹" value={newPlanForm.monthly_price} onChange={e=>setNewPlanForm({...newPlanForm,monthly_price:e.target.value})}/><input type="number" min="0" placeholder="Annual ₹" value={newPlanForm.annual_price} onChange={e=>setNewPlanForm({...newPlanForm,annual_price:e.target.value})}/><label className="trial-plan-toggle"><input type="checkbox" checked={newPlanForm.trial_enabled} onChange={e=>setNewPlanForm({...newPlanForm,trial_enabled:e.target.checked})}/> Trial Plan</label><input className="trial-duration-input" type="number" min="1" placeholder="Trial duration" value={newPlanForm.trial_value} disabled={!newPlanForm.trial_enabled} onChange={e=>setNewPlanForm({...newPlanForm,trial_value:e.target.value})}/><select className="trial-unit-select" value={newPlanForm.trial_unit} disabled={!newPlanForm.trial_enabled} onChange={e=>setNewPlanForm({...newPlanForm,trial_unit:e.target.value})}><option>Days</option><option>Months</option><option>Years</option></select><button type="submit" disabled={planCreating}>{planCreating?'Creating…':'＋ Create Plan'}</button><small className="trial-plan-help">Enable Trial Plan to create a Product Owner controlled duration. Assigning this plan to an account starts the configured trial immediately.</small></form>
             <div className="subscription-table-toolbar"><input value={platformSubscriptionSearch} onChange={e=>setPlatformSubscriptionSearch(e.target.value)} placeholder="Search Account / Apartment / Plan / Status"/><button type="button" className="secondary" onClick={()=>loadPlatformSubscriptions(platformToken)}>↻ Refresh</button></div>
-            <div className="table-scroll business-grid"><table className="subscription-table"><thead><tr><th>Account</th><th>Apartment</th><th>Type</th><th>Plan</th><th>Status</th><th>Payment</th><th>Trial / Validity</th><th>Actions</th></tr></thead><tbody>{platformSubscriptions.filter((row:any)=>{const q=platformSubscriptionSearch.trim().toLowerCase();if(!q)return true;const a=row.account||{},s=row.subscription||{},sum=row.summary||{};return [a.account_id,a.apartment_name,a.account_mobile,s.subscription_type,s.status,sum.plan?.name].some((v:any)=>String(v||'').toLowerCase().includes(q));}).map((row:any)=><tr key={row.subscription.id}><td><b>{row.account.account_id}</b></td><td>{row.account.apartment_name}<small>{row.account.city}, {row.account.state}</small></td><td><span className={`subscription-type type-${String(row.subscription.subscription_type).toLowerCase()}`}>{row.subscription.subscription_type}</span></td><td><select value={row.subscription.plan_id||''} onChange={e=>platformAssignPlan(row,e.target.value)}><option value="">Unassigned</option>{platformPlans.filter((p:any)=>p.active).map((p:any)=><option key={p.id} value={p.id}>{p.name} — ₹{Number(p.monthly_price).toLocaleString('en-IN')}/mo</option>)}</select></td><td><span className={`subscription-status status-${String(row.summary.status).toLowerCase()}`}>{row.summary.status}</span>{row.summary.days_remaining!==null&&<small>{row.summary.days_remaining} days</small>}</td><td>{row.summary.payment_status}</td><td>{row.subscription.trial_end_date?<>Trial: {formatDate(row.subscription.trial_end_date)}<small>{row.subscription.grace_end_date?`Grace: ${formatDate(row.subscription.grace_end_date)}`:''}</small></>:row.subscription.end_date?`Valid to ${formatDate(row.subscription.end_date)}`:'—'}</td><td className="subscription-actions">{row.subscription.subscription_type==='TRIAL'&&<button type="button" className="secondary" onClick={()=>platformExtendTrialFromSubscription(row)}>＋ Extend Trial</button>}<button type="button" className="secondary" onClick={()=>platformGrantComplimentary(row)}>🎁 Complimentary</button></td></tr>)}</tbody></table></div>
+            <div className="table-scroll business-grid"><table className="subscription-table"><thead><tr><th>Account</th><th>Apartment</th><th>Type</th><th>Plan</th><th>Status</th><th>Payment</th><th>Trial / Validity</th><th>Actions</th></tr></thead><tbody>{platformSubscriptions.filter((row:any)=>{const q=platformSubscriptionSearch.trim().toLowerCase();if(!q)return true;const a=row.account||{},s=row.subscription||{},sum=row.summary||{};return [a.account_id,a.apartment_name,a.account_mobile,s.subscription_type,s.status,sum.plan?.name].some((v:any)=>String(v||'').toLowerCase().includes(q));}).map((row:any)=><tr key={row.subscription.id}><td><b>{row.account.account_id}</b></td><td>{row.account.apartment_name}<small>{row.account.city}, {row.account.state}</small></td><td><span className={`subscription-type type-${String(row.subscription.subscription_type).toLowerCase()}`}>{row.subscription.subscription_type}</span></td><td><div className="subscription-plan-assignment"><select value={platformSelectedPlanByTenant[row.account.tenant_id] ?? row.subscription.plan_id ?? ''} onChange={e=>setPlatformSelectedPlanByTenant(prev=>({...prev,[row.account.tenant_id]:e.target.value}))}><option value="">Select Plan</option>{platformPlans.filter((p:any)=>p.active).map((p:any)=><option key={p.id} value={p.id}>{p.name}{p.trial_enabled?` — Trial ${p.trial_value} ${p.trial_unit}`:` — ₹${Number(p.monthly_price).toLocaleString('en-IN')}/mo`}</option>)}</select><button type="button" className="secondary assign-plan-button" disabled={!((platformSelectedPlanByTenant[row.account.tenant_id] ?? row.subscription.plan_id)||'')||isPlatformBusy(`platform-assign-plan:${row.account.tenant_id}`)} onClick={()=>platformAssignPlan(row,platformSelectedPlanByTenant[row.account.tenant_id] ?? row.subscription.plan_id ?? '')}>{isPlatformBusy(`platform-assign-plan:${row.account.tenant_id}`)?'Assigning…':'Assign'}</button></div></td><td><span className={`subscription-status status-${String(row.summary.status).toLowerCase()}`}>{row.summary.status}</span>{row.summary.days_remaining!==null&&<small>{row.summary.days_remaining} days</small>}</td><td>{row.summary.payment_status}</td><td>{row.subscription.trial_end_date?<>Trial: {formatDate(row.subscription.trial_end_date)}<small>{row.subscription.grace_end_date?`Grace: ${formatDate(row.subscription.grace_end_date)}`:''}</small></>:row.subscription.end_date?`Valid to ${formatDate(row.subscription.end_date)}`:'—'}</td><td className="subscription-actions">{row.subscription.subscription_type==='TRIAL'&&<button type="button" className="secondary" onClick={()=>platformExtendTrialFromSubscription(row)}>＋ Extend Trial</button>}<button type="button" className="secondary" onClick={()=>loadPlatformSubscriptionHistory(platformToken,row.account.tenant_id)}>🕘 History</button><button type="button" className="secondary" onClick={()=>platformGrantComplimentary(row)}>🎁 Complimentary</button></td></tr>)}</tbody></table></div>
+            {platformSubscriptionHistoryTenantId&&<div className="platform-subscription-history">
+              <div className="section-title-row"><div><h3>Subscription History</h3><p className="help-text">Every plan, trial, complimentary-access and lifecycle change for the selected apartment account is retained here.</p></div><button type="button" className="secondary" onClick={()=>{setPlatformSubscriptionHistoryTenantId('');setPlatformSubscriptionHistory([])}}>Close</button></div>
+              <div className="table-scroll business-grid"><table><thead><tr><th>Date / Time</th><th>Action</th><th>Previous Plan</th><th>New Plan</th><th>Previous Status</th><th>New Status</th><th>Trial / Validity</th><th>Changed By</th><th>Reason</th></tr></thead><tbody>{platformSubscriptionHistory.length===0?<tr><td colSpan={9} className="empty">No subscription history found.</td></tr>:platformSubscriptionHistory.map((h:any)=><tr key={h.id}><td>{formatDateTime(h.changed_at)}</td><td><b>{h.action}</b></td><td>{platformPlans.find((p:any)=>p.id===h.old_plan_id)?.name||'—'}</td><td>{platformPlans.find((p:any)=>p.id===h.new_plan_id)?.name||'—'}</td><td>{h.old_status||'—'}</td><td>{h.new_status||'—'}</td><td>{h.new_trial_end?formatDate(h.new_trial_end):'—'}</td><td>{h.changed_by||'—'}</td><td>{h.reason||'—'}</td></tr>)}</tbody></table></div>
+            </div>}
           </section>}
 
           {platformConsoleTab==='audit' && <section className="panel platform-property audit-history-console"><div className="section-title-row"><div><h2>🔐 Global Login & Audit History</h2><p className="subtitle">Search, filter, download or delete only records matching the entered criteria. Account and User filters are tenant-aware.</p></div><span className="audit-count-badge">{platformLoginHistory.length} shown</span></div><div className="audit-filter-grid"><label className="wide">🔎 Search<input value={platformAuditSearch} onChange={e=>setPlatformAuditSearch(e.target.value)} placeholder="Account / Apartment / User / Event / Details"/></label><label>Account Number<input value={platformAuditAccount} onChange={e=>setPlatformAuditAccount(e.target.value)} placeholder="IN-TS-ACL-..."/></label><label>User ID<input value={platformAuditUser} onChange={e=>setPlatformAuditUser(e.target.value)} placeholder="User ID"/></label><label>Event<select value={platformAuditEvent} onChange={e=>setPlatformAuditEvent(e.target.value)}><option value="">All Events</option><option>Login</option><option>Logout</option><option>Failed Login</option><option>Password Changed</option><option>Password Reset</option><option>Apartment Account Created</option><option>Audit History Purged</option></select></label><label>From Date<input type="date" lang="en-GB" value={platformAuditFrom} onChange={e=>setPlatformAuditFrom(e.target.value)}/></label><label>To Date<input type="date" lang="en-GB" value={platformAuditTo} onChange={e=>setPlatformAuditTo(e.target.value)}/></label></div><div className="audit-toolbar"><button type="button" onClick={()=>loadPlatformLoginHistory(platformToken)}>🔎 Apply Filters</button><button type="button" className="secondary" onClick={()=>{setPlatformAuditSearch('');setPlatformAuditAccount('');setPlatformAuditUser('');setPlatformAuditEvent('');setPlatformAuditFrom('');setPlatformAuditTo('');setTimeout(()=>loadPlatformLoginHistory(platformToken),0)}}>↻ Reset</button><button type="button" className="secondary" onClick={downloadPlatformAuditHistory}>⬇ Download CSV</button><button type="button" className="danger" onClick={purgePlatformAuditHistory}>🗑 Delete Matching Records</button></div><div className="audit-safety-note">⚠️ Delete uses <b>AND criteria</b>: every populated filter must match. A blank field means “Any”. The purge event itself is retained.</div><div className="table-scroll business-grid audit-results-scroll"><table><thead><tr><th>Date / Time</th><th>Account Number</th><th>Apartment</th><th>User ID</th><th>Event</th><th>Status</th><th>Reason / Details</th></tr></thead><tbody>{platformLoginHistory.length===0?<tr><td colSpan={7} className="empty">No records match the selected criteria.</td></tr>:platformLoginHistory.map((h:any,idx:number)=><tr key={`${h.id||'h'}-${idx}`}><td>{formatDateTime(h.at)}</td><td>{h.account_id||'Platform'}</td><td>{h.apartment_name||'Platform'}</td><td>{h.username||'—'}</td><td><b>{h.event||'—'}</b></td><td>{h.status||'—'}</td><td>{h.reason||'—'}</td></tr>)}</tbody></table></div></section>}
@@ -2316,7 +2454,7 @@ button{cursor:pointer}
                 </label>
                 <button type="button" className="secondary" onClick={()=>setPlatformRecoveryUserSearch('')}>Clear Search</button>
               </div>
-              <div className="table-scroll business-grid"><table><thead><tr><th>User ID</th><th>Name</th><th>Role</th><th>Email</th><th>Mobile</th><th>Status</th><th>Lock</th><th>Actions</th></tr></thead><tbody>{(()=>{const q=platformRecoveryUserSearch.trim().toLowerCase();const users=(platformRecoveryProperty.users||[]).filter((u:any)=>!q||[u.username,u.full_name,u.role,u.email,u.mobile_no,u.active?'Active':'Inactive',u.locked?'Locked':'Open'].some((v:any)=>String(v||'').toLowerCase().includes(q)));return users.length===0?<tr><td colSpan={8} className="empty">{q?'No matching tenant users found.':'No users available for this apartment.'}</td></tr>:users.map((u:any)=><tr key={u.id}><td><b>{u.username}</b>{platformRecoveryProperty.tenant_id==='ALL'&&<small>{u._account_id||'—'}</small>}</td><td>{u.full_name}{platformRecoveryProperty.tenant_id==='ALL'&&<small>{u._apartment_name||'—'}</small>}</td><td>{u.role}</td><td>{u.email||'—'}</td><td>{u.mobile_no||'—'}</td><td>{u.active?'Active':'Inactive'}</td><td>{u.locked?'Locked':'Open'}</td><td><button type="button" className="secondary" onClick={()=>platformResetUser(u.id,platformRecoveryProperty.tenant_id==='ALL'?u._tenant_id:platformRecoveryProperty.tenant_id)}>Reset Password</button>{u.locked&&<button type="button" className="secondary" onClick={()=>platformUnlock(u.id,platformRecoveryProperty.tenant_id==='ALL'?u._tenant_id:platformRecoveryProperty.tenant_id)}>Unlock / Activate</button>}</td></tr>)})()}</tbody></table></div>
+              <div className="table-scroll business-grid"><table><thead><tr><th>User ID</th><th>Name</th><th>Apartment</th><th>Role</th><th>Email</th><th>Mobile</th><th>Status</th><th>Last Activity</th><th>History</th><th>Actions</th></tr></thead><tbody>{(()=>{const q=platformRecoveryUserSearch.trim().toLowerCase();const users=(platformRecoveryProperty.users||[]).filter((u:any)=>!q||[u.username,u.full_name,u.role,u.email,u.mobile_no,u.active?'Active':'Inactive',u.locked?'Locked':'Open'].some((v:any)=>String(v||'').toLowerCase().includes(q)));return users.length===0?<tr><td colSpan={10} className="empty">{q?'No matching tenant users found.':'No users available for this apartment.'}</td></tr>:users.map((u:any)=><tr key={u.id}>{(()=>{const tid=platformRecoveryProperty.tenant_id==='ALL'?u._tenant_id:platformRecoveryProperty.tenant_id;const hist=(platformLoginHistory||[]).filter((h:any)=>String(h.username||'').toLowerCase()===String(u.username||'').toLowerCase() && (!tid || !h.tenant_id || h.tenant_id===tid));const last=hist[0];return <><td><b>{u.username}</b></td><td>{u.full_name}</td><td>{platformRecoveryProperty.tenant_id==='ALL'?(u._apartment_name||'—'):(platformRecoveryProperty.apartment_name||'—')}</td><td>{u.role}</td><td>{u.email||'—'}</td><td>{u.mobile_no||'—'}</td><td>{u.active?'Active':'Inactive'}{u.locked&&<small>Locked</small>}</td><td>{last?formatDateTime(last.at):'No history'}</td><td><b>{hist.length}</b> event{hist.length===1?'':'s'}</td><td><button type="button" className="secondary" onClick={()=>platformResetUser(u.id,tid)}>Reset Password</button>{u.locked&&<button type="button" className="secondary" onClick={()=>platformUnlock(u.id,tid)}>Unlock / Activate</button>}</td></>})()}</tr>)})()}</tbody></table></div>
             </>:<div className="empty">Select an Apartment Account above. The selected tenant's Admins and users will be shown here for controlled password recovery.</div>}
           </section>}
           <div className="form-actions platform-logout-row"><button type="button" className="auth-secondary-button" onClick={platformLogout}>🔒 Logout Platform Owner</button></div>
@@ -2357,13 +2495,33 @@ button{cursor:pointer}
         .auth-card .remember-login>span{line-height:1.35!important}
         .auth-primary-button{background:linear-gradient(135deg,#2563eb,#0f9f9a)!important;color:#fff!important;border:0!important;border-radius:11px!important;min-height:44px!important;padding:10px 18px!important;font-weight:800!important;box-shadow:0 8px 18px rgba(37,99,235,.22)!important}.auth-secondary-button,.auth-back-button{background:#fff!important;color:#315f96!important;border:1px solid #c8d5e5!important;border-radius:10px!important;min-height:40px!important;padding:8px 14px!important;font-weight:750!important}.account-id-preview{padding:13px 15px!important;border:1px solid #bfdbfe!important;border-radius:12px!important;background:#eff6ff!important;color:#1d4ed8!important;font-weight:750!important;margin-bottom:14px!important}
         @media(max-width:760px){.auth-shell{padding:14px!important}.auth-card{padding:20px!important;border-radius:18px!important}.auth-brand{align-items:flex-start!important;flex-direction:column!important}.auth-widgets,.auth-form{grid-template-columns:1fr!important}.auth-logo{width:130px!important;height:92px!important}.auth-logo img{width:120px!important;height:84px!important}.auth-brand h1{font-size:26px!important}}
-      `}</style>
+      
+      /* V6.5.13 CORE FUNCTIONALITY FIX 15 — Platform Owner branding alignment */
+      .platform-owner-auth-shell .auth-brand{
+        display:flex!important;flex-direction:row!important;align-items:center!important;justify-content:flex-start!important;
+        gap:18px!important;width:100%!important;box-sizing:border-box!important;text-align:left!important;
+      }
+      .platform-owner-auth-shell .auth-brand .auth-logo{
+        flex:0 0 88px!important;width:88px!important;height:68px!important;display:flex!important;align-items:center!important;justify-content:center!important;
+        margin:0!important;border-radius:14px!important;overflow:hidden!important;background:#fff!important;border:1px solid #dbe5ef!important;padding:4px!important;
+      }
+      .platform-owner-auth-shell .auth-brand .auth-logo img{width:100%!important;height:100%!important;object-fit:contain!important;display:block!important}
+      .platform-owner-auth-shell .auth-brand-copy{display:flex!important;flex-direction:column!important;align-items:flex-start!important;justify-content:center!important;min-width:0!important}
+      .platform-owner-auth-shell .auth-brand-copy h1{margin:0!important;line-height:1.12!important}
+      .platform-owner-auth-shell .auth-brand-copy p{margin:5px 0 0!important}
+      .platform-owner-auth-shell .auth-brand-copy em{display:block!important;margin:5px 0 0!important}
+      @media(max-width:600px){
+        .platform-owner-auth-shell .auth-brand{gap:12px!important}
+        .platform-owner-auth-shell .auth-brand .auth-logo{flex-basis:72px!important;width:72px!important;height:56px!important}
+        .platform-owner-auth-shell .auth-brand-copy h1{font-size:22px!important}
+      }
+`}</style>
       <div className="auth-brand"><div className="auth-logo"><img src="/apartcare-lite-logo.png" alt="ApartCare Lite"/></div><div><h1>ApartCare Lite</h1><p>Your daily partner in property care.</p><em>Helping you run your building beautifully.</em></div></div><div className="auth-widgets"><div className="auth-widget"><span>🏢</span><b>Property Operations</b><small>Maintenance, payments and residents in one place</small></div><div className="auth-widget"><span>📊</span><b>Financial Clarity</b><small>Connected dashboard, expenses and reports</small></div><div className="auth-widget"><span>🔐</span><b>Secure Roles</b><small>Admin and Viewer access with controlled sessions</small></div></div>
       {loginError&&<div className="message">{loginError}</div>}
       {showCreate ? <>
         <h2>Create Apartment Account</h2><div className="account-id-preview">Account Number will be generated automatically after validation.<span className="field-hint">Country Code – State Code – ACL – Date – Sequence</span></div><p className="subtitle">Admin and Viewer access is created inside the property. Platform Super Admin remains exclusive to the Product Owner.</p>
-        <form className="resident-form auth-form" onSubmit={createApartmentAccount}><h3>Apartment Profile</h3><label>Apartment Name<input required value={accountForm.apartment_name} onChange={e=>setAccountForm({...accountForm,apartment_name:e.target.value})}/></label><label>Address<input required value={accountForm.address} onChange={e=>setAccountForm({...accountForm,address:e.target.value})}/></label><label>City<select required value={accountForm.city} onChange={e=>setAccountForm({...accountForm,city:e.target.value})}><option value="">Select City</option>{CITY_OPTIONS.map(x=><option key={x}>{x}</option>)}</select></label><label>State<select required value={accountForm.state} onChange={e=>setAccountForm({...accountForm,state:e.target.value})}><option value="">Select State</option>{STATE_OPTIONS.map(x=><option key={x}>{x}</option>)}</select></label><label>PIN Code<input required value={accountForm.pin_code} onChange={e=>setAccountForm({...accountForm,pin_code:e.target.value})}/></label><label>Country<select required value={accountForm.country} onChange={e=>setAccountForm({...accountForm,country:e.target.value})}>{COUNTRY_OPTIONS.map(x=><option key={x}>{x}</option>)}</select></label><label>Language<select value={accountForm.language} onChange={e=>setAccountForm({...accountForm,language:e.target.value})}><option>English</option><option>Hindi</option><option>Telugu</option></select></label><div className="field-hint operational-start-note">Operational data month selection is derived from the tenant's locked Go-Live Opening Balance. Until an Opening Balance is locked, all MM/YYYY periods remain available.</div><h3>Property Administrator</h3><label>Administrator Name<input required value={accountForm.admin_name} onChange={e=>setAccountForm({...accountForm,admin_name:e.target.value})}/></label><label>Administrator Email<span className="field-hint">Mandatory — welcome email and Account ID are sent here.</span><input required type="email" value={accountForm.admin_email} onChange={e=>setAccountForm({...accountForm,admin_email:e.target.value})}/></label><label>Administrator Mobile Number<input required inputMode="tel" value={accountForm.admin_mobile} onChange={e=>setAccountForm({...accountForm,admin_mobile:e.target.value})}/></label><label>Administrator User ID<input value={accountForm.admin_username} onChange={e=>setAccountForm({...accountForm,admin_username:e.target.value})}/></label><label className="password-form-field initial-password-field"><span className="field-label">Initial Password</span><span className="field-hint password-help">This password is temporary. The Administrator must change it at first login.</span><div className="password-field"><input required minLength={8} type={showCreatePassword?'text':'password'} value={accountForm.password} onChange={e=>setAccountForm({...accountForm,password:e.target.value})}/><button type="button" className="password-toggle eye-toggle" onClick={()=>setShowCreatePassword(!showCreatePassword)}>{eye(showCreatePassword)}</button></div></label><label className="password-form-field confirm-password-field"><span className="field-label">Confirm Password</span><span className="field-hint password-help-spacer" aria-hidden="true">&nbsp;</span><div className="password-field"><input required minLength={8} type={showConfirmPassword?'text':'password'} value={accountForm.confirm_password} onChange={e=>setAccountForm({...accountForm,confirm_password:e.target.value})}/><button type="button" className="password-toggle eye-toggle" onClick={()=>setShowConfirmPassword(!showConfirmPassword)}>{eye(showConfirmPassword)}</button></div></label><div className="form-actions"><button type="submit" className="auth-primary-button" disabled={accountBusy}>{accountBusy?'⏳ Creating Apartment Account…':'🏢 Create Apartment Account'}</button></div></form><div className="auth-navigation"><button type="button" className="auth-back-button" onClick={()=>{setAuthMode('login');setLoginError('')}}>← Back to Login</button></div>
-      </> : authMode==='forgot' ? <><h2>Forgot Password</h2><p className="subtitle">Enter the property Account ID and the registered Administrator Email or User ID. A secure reset code will be sent only to the registered email address.</p><form className="resident-form auth-form" onSubmit={requestPasswordReset}><label>Account ID<input required placeholder={accountExample} value={forgotForm.account_id} onChange={e=>setForgotForm({...forgotForm,account_id:e.target.value.toUpperCase()})}/></label><label>Registered Email / User ID<input required value={forgotForm.email_or_username} onChange={e=>setForgotForm({...forgotForm,email_or_username:e.target.value})}/></label><div className="form-actions"><button type="submit" className="auth-primary-button">📧 Send Password Reset Email</button></div></form><div className="auth-navigation"><button type="button" className="auth-back-button" onClick={()=>{setAuthMode('login');setLoginError('')}}>← Back to Login</button></div></> : authMode==='reset' ? <><h2>Reset Password</h2><p className="subtitle">Check your registered email for the one-time reset code. The code expires after 30 minutes.</p><form className="resident-form auth-form" onSubmit={confirmPasswordReset}><label>Reset Code<input required value={resetForm.token} onChange={e=>setResetForm({...resetForm,token:e.target.value})}/></label><label>New Password<div className="password-field"><input required minLength={8} type={showForgotPassword?'text':'password'} value={resetForm.new_password} onChange={e=>setResetForm({...resetForm,new_password:e.target.value})}/><button type="button" className="password-toggle eye-toggle" onClick={()=>setShowForgotPassword(!showForgotPassword)}>{eye(showForgotPassword)}</button></div></label><label>Confirm Password<div className="password-field"><input required minLength={8} type={showConfirmPassword?'text':'password'} value={resetForm.confirm_password} onChange={e=>setResetForm({...resetForm,confirm_password:e.target.value})}/><button type="button" className="password-toggle eye-toggle" onClick={()=>setShowConfirmPassword(!showConfirmPassword)}>{eye(showConfirmPassword)}</button></div></label><div className="form-actions"><button type="submit" className="auth-primary-button">🔐 Reset Password</button></div></form><button type="button" className="auth-back-button" onClick={()=>{setAuthMode('login');setLoginError('')}}>← Back to Login</button></> : <><h2>Login to Your Property</h2><p className="subtitle">Sign in securely with your Account ID, registered Email / User ID and password. Apartment access uses Admin, Viewer and Supervisor roles.</p><form className="resident-form auth-form" onSubmit={loginToApartCare}><label>Account Number<span className="field-hint">Example: {accountExample}</span><input required placeholder={accountExample} value={loginForm.account_id} onChange={e=>setLoginForm({...loginForm,account_id:e.target.value.toUpperCase()})}/></label><label>Email / User ID<input required value={loginForm.username} onChange={e=>setLoginForm({...loginForm,username:e.target.value})}/></label><label>Password<div className="password-field"><input required type={showPassword?'text':'password'} value={loginForm.password} onChange={e=>setLoginForm({...loginForm,password:e.target.value})}/><button type="button" className="password-toggle eye-toggle" aria-label="Show or hide password" onClick={()=>setShowPassword(!showPassword)}>{eye(showPassword)}</button></div></label><div className="remember-login" role="group" aria-label="Remember Account Number and User on this device"><button type="button" className={`remember-toggle ${rememberLogin?'is-checked':''}`} role="switch" aria-checked={rememberLogin} aria-label="Remember Account Number and User on this device" onClick={()=>setRememberLogin(!rememberLogin)}><span className="remember-toggle-mark" aria-hidden="true">✓</span></button><span>Remember Account Number & User on this device</span></div><div className="remember-note">Your browser may securely remember the password using its password manager. ApartCare does not store your password in application storage.</div><div className="form-actions"><button type="submit" className="auth-primary-button">🔐 Login</button></div></form><button type="button" className="auth-secondary-button" onClick={()=>{setAuthMode('forgot');setLoginError('')}}>🔑 Forgot Password</button></>}
+        <form className="resident-form auth-form" onSubmit={createApartmentAccount}><h3>Apartment Profile</h3><label>Apartment Name<input required value={accountForm.apartment_name} onChange={e=>setAccountForm({...accountForm,apartment_name:e.target.value})}/></label><label>Address<input required value={accountForm.address} onChange={e=>setAccountForm({...accountForm,address:e.target.value})}/></label><label>City<select required value={accountForm.city} onChange={e=>setAccountForm({...accountForm,city:e.target.value})}><option value="">Select City</option>{CITY_OPTIONS.map(x=><option key={x}>{x}</option>)}</select></label><label>State<select required value={accountForm.state} onChange={e=>setAccountForm({...accountForm,state:e.target.value})}><option value="">Select State</option>{STATE_OPTIONS.map(x=><option key={x}>{x}</option>)}</select></label><label>PIN Code<input required value={accountForm.pin_code} onChange={e=>setAccountForm({...accountForm,pin_code:e.target.value})}/></label><label>Country<select required value={accountForm.country} onChange={e=>setAccountForm({...accountForm,country:e.target.value})}>{COUNTRY_OPTIONS.map(x=><option key={x}>{x}</option>)}</select></label><label>Language<select value={accountForm.language} onChange={e=>setAccountForm({...accountForm,language:e.target.value})}><option>English</option><option>Hindi</option><option>Telugu</option></select></label><div className="field-hint operational-start-note">Operational data month selection is derived from the tenant's locked Go-Live Opening Balance. Until an Opening Balance is locked, all MM/YYYY periods remain available.</div><h3>Property Administrator</h3><label>Administrator Name<input required value={accountForm.admin_name} onChange={e=>setAccountForm({...accountForm,admin_name:e.target.value})}/></label><label>Administrator Email<span className="field-hint">Mandatory — welcome email and Account ID are sent here.</span><input required type="email" value={accountForm.admin_email} onChange={e=>setAccountForm({...accountForm,admin_email:e.target.value})}/></label><label>Administrator Mobile Number<input required inputMode="tel" value={accountForm.admin_mobile} onChange={e=>setAccountForm({...accountForm,admin_mobile:e.target.value})}/></label><label>Administrator User ID<input value={accountForm.admin_username} onChange={e=>setAccountForm({...accountForm,admin_username:e.target.value})}/></label><label className="password-form-field initial-password-field"><span className="field-label">Initial Password</span><span className="field-hint password-help">This is the Administrator login password. A password change is required only after an explicit password reset.</span><div className="password-field"><input required minLength={8} type={showCreatePassword?'text':'password'} value={accountForm.password} onChange={e=>setAccountForm({...accountForm,password:e.target.value})}/><button type="button" className="password-toggle eye-toggle" onClick={()=>setShowCreatePassword(!showCreatePassword)}>{eye(showCreatePassword)}</button></div></label><label className="password-form-field confirm-password-field"><span className="field-label">Confirm Password</span><span className="field-hint password-help-spacer" aria-hidden="true">&nbsp;</span><div className="password-field"><input required minLength={8} type={showConfirmPassword?'text':'password'} value={accountForm.confirm_password} onChange={e=>setAccountForm({...accountForm,confirm_password:e.target.value})}/><button type="button" className="password-toggle eye-toggle" onClick={()=>setShowConfirmPassword(!showConfirmPassword)}>{eye(showConfirmPassword)}</button></div></label><div className="form-actions"><button type="submit" className="auth-primary-button" disabled={accountBusy}>{accountBusy?'⏳ Creating Apartment Account…':'🏢 Create Apartment Account'}</button></div></form><div className="auth-navigation"><button type="button" className="auth-back-button" onClick={()=>{setAuthMode('login');setLoginError('')}}>← Back to Login</button></div>
+      </> : authMode==='forgot' ? <><h2>Forgot Password</h2><p className="subtitle">Enter the property Account ID and the registered Administrator Email or User ID. A secure reset code will be sent only to the registered email address.</p><form className="resident-form auth-form" onSubmit={requestPasswordReset}><label>Account ID<input required placeholder={accountExample} value={forgotForm.account_id} onChange={e=>setForgotForm({...forgotForm,account_id:e.target.value.toUpperCase()})}/></label><label>Registered Email / User ID<input required value={forgotForm.email_or_username} onChange={e=>setForgotForm({...forgotForm,email_or_username:e.target.value})}/></label><div className="form-actions"><button type="submit" className="auth-primary-button">📧 Send Password Reset Email</button></div></form><div className="auth-navigation"><button type="button" className="auth-back-button" onClick={()=>{setAuthMode('login');setLoginError('')}}>← Back to Login</button></div></> : authMode==='reset' ? <><h2>Reset Password</h2><p className="subtitle">Check your registered email for the one-time reset code. The code expires after 30 minutes.</p><form className="resident-form auth-form" onSubmit={confirmPasswordReset}><label>Reset Code<input required value={resetForm.token} onChange={e=>setResetForm({...resetForm,token:e.target.value})}/></label><label>New Password<div className="password-field"><input required minLength={8} type={showForgotPassword?'text':'password'} value={resetForm.new_password} onChange={e=>setResetForm({...resetForm,new_password:e.target.value})}/><button type="button" className="password-toggle eye-toggle" onClick={()=>setShowForgotPassword(!showForgotPassword)}>{eye(showForgotPassword)}</button></div></label><label>Confirm Password<div className="password-field"><input required minLength={8} type={showConfirmPassword?'text':'password'} value={resetForm.confirm_password} onChange={e=>setResetForm({...resetForm,confirm_password:e.target.value})}/><button type="button" className="password-toggle eye-toggle" onClick={()=>setShowConfirmPassword(!showConfirmPassword)}>{eye(showConfirmPassword)}</button></div></label><div className="form-actions"><button type="submit" className="auth-primary-button">🔐 Reset Password</button></div></form><button type="button" className="auth-back-button" onClick={()=>{setAuthMode('login');setLoginError('')}}>← Back to Login</button></> : <><h2>Login to Your Property</h2><p className="subtitle">Sign in securely with your Account ID, registered Email / User ID and password. Apartment access uses Admin, Viewer and Supervisor roles.</p><form className="resident-form auth-form" onSubmit={loginToApartCare}><label>Account Number<span className="field-hint">Example: {accountExample}</span><input required placeholder={accountExample} value={loginForm.account_id} onChange={e=>setLoginForm({...loginForm,account_id:e.target.value.toUpperCase()})}/></label><label>Email / User ID<input required value={loginForm.username} onChange={e=>setLoginForm({...loginForm,username:e.target.value})}/></label><label>Password<div className="password-field"><input required type={showPassword?'text':'password'} value={loginForm.password} onChange={e=>setLoginForm({...loginForm,password:e.target.value})}/><button type="button" className="password-toggle eye-toggle" aria-label="Show or hide password" onClick={()=>setShowPassword(!showPassword)}>{eye(showPassword)}</button></div></label><div className="remember-login" role="group" aria-label="Remember Account Number and User on this device"><button type="button" className={`remember-toggle ${rememberLogin?'is-checked':''}`} role="switch" aria-checked={rememberLogin} aria-label="Remember Account Number and User on this device" onClick={()=>{const next=!rememberLogin;setRememberLogin(next);if(!next)window.localStorage.removeItem('apartcare_login_identity')}}><span className="remember-toggle-mark" aria-hidden="true">✓</span></button><span>Remember Account Number & User on this device</span></div><div className="remember-note">Your browser may securely remember the password using its password manager. ApartCare does not store your password in application storage.</div><div className="form-actions"><button type="submit" className="auth-primary-button">🔐 Login</button></div></form><button type="button" className="auth-secondary-button" onClick={()=>{setAuthMode('forgot');setLoginError('')}}>🔑 Forgot Password</button></>}
       <div className="auth-links">{accountInitialized && <button type="button" className="auth-secondary-button" onClick={()=>{setAuthMode(showCreate?'login':'create');setLoginError('')}}>{showCreate?'← Already have an account? Login':'＋ Create New Apartment Account'}</button>}<button type="button" className="auth-secondary-button platform-link" onClick={()=>{resetPlatformAuthState();setAuthMode('platform');setLoginError('')}}>🛡️ Platform Owner Access</button></div>
     </section></div>;
   }
@@ -2402,7 +2560,7 @@ button{cursor:pointer}
       .panel,.form-panel,.table-panel,.period-panel,.water-box{border:1px solid var(--line);box-shadow:0 10px 26px rgba(51,65,85,.06);border-radius:16px;background:rgba(255,255,255,.92)}
       button,.button-link{border-radius:10px!important;transition:transform .18s ease,box-shadow .18s ease,filter .18s ease!important;box-shadow:0 5px 14px rgba(59,104,184,.14)} button:hover:not(:disabled),.button-link:hover{transform:translateY(-2px);filter:brightness(1.03);box-shadow:0 9px 20px rgba(59,104,184,.20)}
       .sidebar button{border-radius:10px!important;margin:3px 6px;width:calc(100% - 12px);text-align:left}.sidebar button.active{background:linear-gradient(90deg,#3d67b4,#527bc8)!important;color:#fff;box-shadow:0 8px 18px rgba(26,53,104,.35)}
-      .premium-kpis{gap:20px}.kpi-card{position:relative;overflow:hidden;min-height:128px;border-left:5px solid var(--accent);background:linear-gradient(135deg,var(--soft),#fff)!important;box-shadow:0 10px 24px rgba(51,65,85,.10)}.kpi-card .value{font-size:2.05rem;font-weight:800;color:#344054;position:relative;z-index:2}.kpi-card .label{position:relative;z-index:2;font-weight:700}.kpi-glow{position:absolute;width:110px;height:110px;border-radius:50%;right:-35px;bottom:-45px;background:var(--accent);opacity:.10}.kpi-1{--accent:#6b4e9b;--soft:#f3effa}.kpi-2{--accent:#19726a;--soft:#edf8f6}.kpi-3{--accent:#315f96;--soft:#eef4fb}.kpi-4{--accent:#b47712;--soft:#fff7e8}.kpi-5{--accent:#2e7d4e;--soft:#eef9f1}.kpi-6{--accent:#7b5ea7;--soft:#f5f1fb}
+      .premium-kpis{gap:20px}.dashboard-kpis{display:grid!important;grid-template-columns:repeat(6,minmax(0,1fr))!important;gap:14px!important;align-items:stretch!important}.dashboard-kpis .kpi-card{min-width:0!important}.kpi-card{position:relative;overflow:hidden;min-height:128px;border-left:5px solid var(--accent);background:linear-gradient(135deg,var(--soft),#fff)!important;box-shadow:0 10px 24px rgba(51,65,85,.10)}.kpi-card .value{font-size:2.05rem;font-weight:800;color:#344054;position:relative;z-index:2}.kpi-card .label{position:relative;z-index:2;font-weight:700}.kpi-glow{position:absolute;width:110px;height:110px;border-radius:50%;right:-35px;bottom:-45px;background:var(--accent);opacity:.10}.kpi-1{--accent:#6b4e9b;--soft:#f3effa}.kpi-2{--accent:#19726a;--soft:#edf8f6}.kpi-3{--accent:#315f96;--soft:#eef4fb}.kpi-4{--accent:#b47712;--soft:#fff7e8}.kpi-5{--accent:#2e7d4e;--soft:#eef9f1}.kpi-6{--accent:#7b5ea7;--soft:#f5f1fb}
       .two-donuts{grid-template-columns:repeat(2,minmax(0,1fr));gap:26px}.premium-donut-panel{min-height:470px;padding:26px}.premium-donut-panel h2{margin:0 0 16px}.premium-donut-row{display:flex;align-items:center;justify-content:center;gap:38px;min-height:380px}.premium-donut-chart{width:330px;height:330px;border-radius:50%;position:relative;box-shadow:inset 0 0 0 1px rgba(255,255,255,.6)}.premium-hole{position:absolute;inset:88px;border-radius:50%;background:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;box-shadow:0 2px 18px rgba(15,23,42,.08)}.premium-hole strong{font-size:1.35rem}.premium-hole span{font-size:.85rem;color:#64748b;margin-top:5px}.premium-legend{display:grid;gap:13px;min-width:170px}.premium-legend div{display:grid;grid-template-columns:14px 1fr auto;align-items:center;gap:9px}.premium-legend span{width:14px;height:14px;border-radius:3px}.premium-legend b{font-weight:600}.premium-legend small{color:#64748b;font-weight:700}
       .auth-widget,.auth-card,.platform-card{box-shadow:0 14px 34px rgba(51,65,85,.12)}
       /* V6.2.1 — Global ApartCare action-button standard: primary actions match Login */
@@ -2983,11 +3141,281 @@ input[type="checkbox"]{
         transform:none!important;margin:0!important;padding:0!important;
       }
 
-      `}      
+      /* V6.5.13 CORE FUNCTIONALITY FIX 14 — cloud layout hardening.
+         Keep module identity/title/action areas horizontal on desktop. Forms and
+         dense data-entry fields remain intentionally vertical for usability. */
+      .page-title-row,.section-title-row{display:flex!important;align-items:center!important;justify-content:space-between!important;gap:18px!important;width:100%!important;box-sizing:border-box!important}
+      .page-title-row>div:first-child,.section-title-row>div:first-child{min-width:0!important;flex:1 1 auto!important}
+      .page-title-row>button,.page-title-row>label,.section-title-row>button,.section-title-row>.audit-count-badge{flex:0 0 auto!important}
+      .page-title-row h1,.page-title-row h2,.page-title-row p,.section-title-row h2,.section-title-row h3,.section-title-row p{margin-top:0!important}
+      .module-header,.module-brand-row,.module-identity-row{display:flex!important;align-items:center!important;justify-content:space-between!important;gap:18px!important;flex-wrap:nowrap!important;width:100%!important}
+      .module-header>*:first-child,.module-brand-row>*:first-child,.module-identity-row>*:first-child{min-width:0!important;flex:1 1 auto!important}
+      .module-header>*:last-child,.module-brand-row>*:last-child,.module-identity-row>*:last-child{flex:0 0 auto!important}
+
+      /* V6.5.13 CORE FUNCTIONALITY FIX 13 — deterministic cloud layout. */
+      .identity-header{
+        display:flex!important;flex-direction:row!important;align-items:center!important;justify-content:space-between!important;
+        gap:28px!important;flex-wrap:nowrap!important;width:100%!important;box-sizing:border-box!important;
+      }
+      .identity-header .apartment-brand{
+        display:flex!important;flex:1 1 auto!important;min-width:0!important;align-items:center!important;gap:14px!important;
+      }
+      .identity-header .apartment-brand>div:last-child{min-width:0!important;display:block!important}
+      .identity-header .apartment-brand h2,.identity-header .apartment-brand p{margin-top:0!important;margin-bottom:4px!important}
+      .identity-header .app-brand{
+        display:flex!important;flex:0 0 auto!important;align-items:center!important;gap:12px!important;min-width:300px!important;
+        justify-content:flex-end!important;white-space:nowrap!important;
+      }
+      .identity-header .app-brand>div:last-child{min-width:0!important;display:flex!important;flex-direction:column!important;gap:2px!important}
+      .identity-header .app-brand h2,.identity-header .app-brand p,.identity-header .app-brand em{margin:0!important}
+
+      /* .two-donuts had column sizing without an explicit grid display, so the
+         browser stacked the two dashboard charts vertically. */
+      .two-donuts{
+        display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:24px!important;
+        align-items:stretch!important;width:100%!important;
+      }
+      .two-donuts>.donut-panel,.two-donuts>.premium-donut-panel{min-width:0!important;width:100%!important;box-sizing:border-box!important}
+      @media(max-width:900px){
+        .identity-header{gap:18px!important;padding:14px 18px!important}
+        .identity-header .app-brand{min-width:270px!important}
+        .two-donuts{grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:14px!important}
+      }
+      @media(max-width:680px){
+        .platform-owner-auth-shell .auth-brand{align-items:flex-start!important;gap:12px!important}
+        .platform-owner-auth-shell .auth-logo{width:82px!important;height:60px!important;flex-basis:82px!important}
+        .platform-owner-auth-shell .auth-brand-copy h1{font-size:24px!important}
+        .page-title-row,.section-title-row{align-items:flex-start!important;flex-direction:column!important;gap:10px!important}
+        .page-title-row>button,.page-title-row>label,.section-title-row>button,.section-title-row>.audit-count-badge{align-self:flex-start!important}
+        .identity-header{gap:10px!important;padding:12px 14px!important}
+        .identity-header .apartment-brand{gap:9px!important}
+        .identity-header .app-brand{min-width:245px!important;gap:8px!important}
+        .identity-header .logo-mark{width:50px!important;height:42px!important;flex:0 0 50px!important}
+        .identity-header .app-brand h2{font-size:1rem!important}
+        .identity-header .app-brand p,.identity-header .app-brand em{font-size:.72rem!important;line-height:1.2!important}
+        .identity-header .apartment-brand h2{font-size:1.05rem!important}
+        .identity-header .apartment-brand p{font-size:.72rem!important;line-height:1.2!important}
+        .two-donuts{grid-template-columns:1fr!important}
+      }
+            /* V6.5.13 CORE FUNCTIONALITY FIX 15 — final application workspace layout system.
+         Desktop forms use compact multi-column grids; controls remain stacked inside each field.
+         Mobile intentionally collapses to one column for usability. */
+      .main .form-panel,.main .panel,.main .table-panel,.main .water-box{box-sizing:border-box!important}
+      .main .resident-form{
+        display:grid!important;grid-template-columns:repeat(4,minmax(0,1fr))!important;
+        gap:16px 18px!important;padding:18px!important;align-items:start!important;
+      }
+      .main .resident-form>label{
+        display:flex!important;flex-direction:column!important;gap:6px!important;width:100%!important;min-width:0!important;
+        align-self:start!important;color:#334e6f!important;font-weight:750!important;line-height:1.25!important;
+      }
+      .main .resident-form>label.full{grid-column:1/-1!important}
+      .main .resident-form>label>input,.main .resident-form>label>select,.main .resident-form>label>textarea{
+        width:100%!important;min-width:0!important;max-width:100%!important;box-sizing:border-box!important;
+        min-height:42px!important;height:auto!important;margin:0!important;
+      }
+      .main .resident-form>label>textarea{min-height:82px!important;resize:vertical!important}
+      .main .resident-form .form-actions{grid-column:1/-1!important;display:flex!important;align-items:center!important;gap:10px!important;margin-top:2px!important;padding-top:12px!important;border-top:1px solid #e6edf5!important}
+
+      /* Monthly Maintenance — compact four-column setup and water calculation. */
+      .main .maintenance-setup-grid{
+        display:grid!important;grid-template-columns:repeat(4,minmax(0,1fr))!important;gap:14px 16px!important;
+        padding:16px!important;align-items:start!important;
+      }
+      .main .maintenance-setup-grid>label{
+        display:flex!important;flex-direction:column!important;gap:6px!important;min-width:0!important;
+        color:#334e6f!important;font-weight:750!important;line-height:1.25!important;
+      }
+      .main .maintenance-setup-grid>label input,.main .maintenance-setup-grid>label select{
+        width:100%!important;min-width:0!important;box-sizing:border-box!important;min-height:42px!important;
+      }
+      .main .maintenance-setup-grid>label:has(input[type="checkbox"]){
+        position:relative!important;padding-top:0!important;
+      }
+      .main .maintenance-setup-grid>label input[type="checkbox"]{
+        width:16px!important;height:16px!important;min-width:16px!important;min-height:16px!important;
+        margin:0 7px 0 0!important;vertical-align:middle!important;align-self:flex-start!important;
+      }
+      .main .maintenance-setup-grid>label input[type="checkbox"] + *{min-width:0}
+      .main .water-box{padding:16px!important;margin-top:14px!important}
+      .main .water-box>h3{margin:0 0 12px!important}
+      .main .water-box .maintenance-setup-grid{border:0!important;box-shadow:none!important;padding:0!important;background:transparent!important}
+
+      /* Month toolbars: title, month selector and actions share one compact row. */
+      .main .month-heading{
+        display:flex!important;align-items:center!important;justify-content:space-between!important;gap:18px!important;
+        flex-wrap:wrap!important;width:100%!important;margin:0!important;padding:0 0 12px!important;
+      }
+      .main .month-heading>h2{margin:0!important;flex:1 1 auto!important;min-width:220px!important}
+      .main .month-selector{display:flex!important;align-items:center!important;gap:8px!important;flex:0 0 auto!important}
+      .main .month-selector label{display:inline-flex!important;align-items:center!important;gap:8px!important;margin:0!important;font-weight:750!important;color:#52657e!important;white-space:nowrap!important}
+      .main .month-selector input{width:160px!important;min-width:160px!important;min-height:42px!important}
+      .main .payment-period>.page-title-row{display:flex!important;align-items:center!important;justify-content:space-between!important;gap:16px!important;flex-wrap:wrap!important}
+      .main .payment-period>.page-title-row .help-text{flex:1 1 520px!important}
+      .main .payment-period>.page-title-row .form-actions{flex:0 0 auto!important;margin:0!important;padding:0!important;border:0!important}
+
+      /* Payment summary and Expense summary — horizontal KPI cards. */
+      .main .summary-grid,.main .expense-kpis,.main .kpi-grid{
+        display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:14px!important;width:100%!important;
+      }
+      .main .expense-kpis{grid-template-columns:repeat(4,minmax(0,1fr))!important}
+      .main .summary-grid>.card,.main .expense-kpis>.card,.main .kpi-grid>.kpi-card{min-width:0!important;width:100%!important}
+      .main .expense-kpis>.card{min-height:104px!important}
+
+      /* Expense entry — compact professional four-column layout. */
+      .main .professional-expense-form{display:grid!important;grid-template-columns:repeat(4,minmax(0,1fr))!important;gap:14px 16px!important;padding:18px!important;align-items:start!important}
+      .main .professional-expense-form label{min-width:0!important;width:100%!important}
+      .main .professional-expense-form label.wide{grid-column:span 2!important}
+      .main .professional-expense-form .form-actions{grid-column:1/-1!important;display:flex!important;align-items:center!important;gap:10px!important}
+
+      /* Reports — controls sized to the actual data type instead of full workspace width. */
+      .main .report-controls{
+        display:flex!important;align-items:flex-end!important;gap:12px!important;flex-wrap:wrap!important;
+        width:100%!important;box-sizing:border-box!important;
+      }
+      .main .report-controls>label{display:flex!important;flex-direction:column!important;gap:6px!important;flex:0 0 auto!important;width:auto!important;min-width:0!important;color:#334e6f!important;font-weight:750!important}
+      .main .report-controls>label select{width:220px!important;min-width:220px!important;max-width:280px!important;min-height:42px!important}
+      .main .report-controls>label input[type="month"]{width:160px!important;min-width:160px!important}
+      .main .report-controls>label select[value="2024"],.main .report-controls>label select[value="2025"],.main .report-controls>label select[value="2026"],.main .report-controls>label select[value="2027"]{width:120px!important;min-width:120px!important}
+      .main .period-options{display:flex!important;align-items:center!important;gap:8px!important;flex-wrap:wrap!important;width:max-content!important;max-width:100%!important}
+      .main .period-options>label:not(.radio){display:inline-flex!important;align-items:center!important;gap:7px!important;width:auto!important;min-width:0!important}
+      .main .period-options>label:not(.radio) select{width:120px!important;min-width:120px!important}
+      .main .period-options>label:not(.radio) input[type="month"]{width:160px!important;min-width:160px!important}
+      .main .report-tabs{display:flex!important;align-items:center!important;gap:8px!important;flex-wrap:wrap!important}
+      .main .report-tabs button{white-space:nowrap!important}
+
+      /* Dashboard — always horizontal on normal desktop widths. */
+      .main .dashboard-kpis{display:grid!important;grid-template-columns:repeat(6,minmax(125px,1fr))!important;gap:14px!important;width:100%!important;align-items:stretch!important}
+      .main .dashboard-kpis>.kpi-card{min-width:0!important;width:100%!important}
+      .main .two-donuts{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:20px!important;width:100%!important}
+
+      /* Module headers remain horizontal; only mobile intentionally stacks them. */
+      .main .page-title-row,.main .section-title-row{display:flex!important;align-items:center!important;justify-content:space-between!important;gap:16px!important;flex-wrap:wrap!important}
+      .main .page-title-row>div:first-child,.main .section-title-row>div:first-child{min-width:0!important;flex:1 1 auto!important}
+      .main .page-title-row>button,.main .section-title-row>button{flex:0 0 auto!important}
+
+      /* Settings / Administration / Utilities / Go-Live inherit the same compact grid. */
+      .main .utility-form{display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:14px 16px!important;padding:16px!important}
+      .main .utility-form .form-actions{grid-column:1/-1!important}
+      .main .history-toolbar{display:flex!important;align-items:flex-end!important;justify-content:space-between!important;gap:14px!important;flex-wrap:wrap!important}
+      .main .history-toolbar select{width:260px!important;min-width:260px!important}
+
+      @media(max-width:1250px){
+        .main .dashboard-kpis{grid-template-columns:repeat(3,minmax(0,1fr))!important}
+        .main .resident-form,.main .maintenance-setup-grid{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+        .main .professional-expense-form{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+        .main .utility-form{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+        .main .expense-kpis{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+      }
+      @media(max-width:800px){
+        .main .dashboard-kpis,.main .summary-grid,.main .expense-kpis,.main .kpi-grid,.main .two-donuts,.main .resident-form,.main .maintenance-setup-grid,.main .professional-expense-form,.main .utility-form{grid-template-columns:1fr!important}
+        .main .resident-form>label.full,.main .professional-expense-form label.wide{grid-column:auto!important}
+        .main .month-heading{align-items:flex-start!important;flex-direction:column!important}
+        .main .month-selector{width:100%!important}.main .month-selector input{width:100%!important;min-width:0!important}
+        .main .report-controls{align-items:stretch!important;flex-direction:column!important}.main .report-controls>label,.main .report-controls>label select,.main .report-controls>label input[type="month"]{width:100%!important;max-width:none!important;min-width:0!important}
+        .main .period-options{width:100%!important}
+        .main .history-toolbar select{width:100%!important;min-width:0!important}
+      }
+
+      /* V6.5.13 CLEAN UI BUILD 2 — professional workspace frame, compact KPIs and true circular donuts. */
+      .main{padding-left:24px!important;padding-right:24px!important;padding-bottom:36px!important;box-sizing:border-box!important}
+      .main>.identity-header,.main>.header-divider{margin-left:-24px!important;margin-right:-24px!important}
+      .main>.identity-header{padding-left:28px!important;padding-right:28px!important}
+      .main>.header-divider{width:auto!important}
+      .main>.panel,.main>.form-panel,.main>.table-panel,.main>.period-panel,.main>.water-box,.main>.utility-panel,.main>.report-workspace,.main>.individual-statement-panel,.main>.import-panel,.main>.golive-panel,.main>.tenant-subscription-panel{margin-left:0!important;margin-right:0!important}
+      .main .kpi-card,.main .expense-kpis>.card,.main .summary-grid>.card,.main .report-kpi{min-height:96px!important;padding:14px 16px!important;border-radius:14px!important}
+      .main .kpi-card .value,.main .expense-kpis .value{font-size:1.55rem!important}
+      .main .kpi-card .label,.main .expense-kpis .label{font-size:.82rem!important;line-height:1.25!important}
+      .main .dashboard-kpis{gap:12px!important;grid-template-columns:repeat(6,minmax(0,1fr))!important}
+      .main .dashboard-kpis>.kpi-card{min-height:96px!important}
+      .main .premium-donut-panel{min-height:390px!important;padding:22px!important}
+      .main .premium-donut-row{min-height:300px!important;gap:28px!important}
+      .main .premium-donut-chart{width:230px!important;height:230px!important;min-width:230px!important;min-height:230px!important;max-width:230px!important;max-height:230px!important;aspect-ratio:1/1!important;flex:0 0 230px!important;border-radius:50%!important}
+      .main .premium-hole{inset:62px!important}
+      .main .premium-hole strong{font-size:1.15rem!important}
+      .main .premium-legend{min-width:150px!important;gap:10px!important}
+      .main .premium-legend div{grid-template-columns:12px 1fr auto!important;gap:7px!important}
+
+      /* Platform Owner: one clean brand row; remove the duplicate logo from the secondary header. */
+      .po-top-header{display:flex!important;align-items:center!important;justify-content:flex-end!important;gap:18px!important;padding:12px 0!important}
+      .po-top-header .po-brand-block{display:none!important}
+      .po-top-header .po-user-meta{display:flex!important;align-items:center!important;justify-content:flex-end!important;gap:12px!important;flex-wrap:nowrap!important}
+      .po-security-pill,.po-user-pill{white-space:nowrap!important}
+      .po-page-header{display:flex!important;align-items:center!important;justify-content:space-between!important;gap:20px!important;flex-wrap:nowrap!important}
+      .po-page-header>div:first-child{min-width:0!important;flex:1 1 auto!important}
+      .po-page-header .po-header-status{flex:0 0 auto!important}
+      .platform-owner-auth-shell .auth-brand{display:flex!important;flex-direction:row!important;align-items:center!important;gap:18px!important}
+      .platform-owner-auth-shell .auth-brand-copy{min-width:0!important;display:grid!important;grid-template-columns:auto auto auto!important;align-items:baseline!important;column-gap:14px!important;row-gap:2px!important}
+      .platform-owner-auth-shell .auth-brand-copy h1{grid-column:1/-1!important;margin:0!important}
+      .platform-owner-auth-shell .auth-brand-copy p,.platform-owner-auth-shell .auth-brand-copy em{margin:0!important}
+
+      /* Platform Owner final header: one logo, one horizontal brand row, one user/security row. */
+      .platform-owner-auth-shell .po-top-header{display:flex!important;align-items:center!important;justify-content:space-between!important;gap:22px!important;padding:12px 28px!important;min-height:82px!important;height:auto!important}
+      .platform-owner-auth-shell .po-brand-block{display:flex!important;align-items:center!important;gap:14px!important;min-width:0!important;flex:1 1 auto!important}
+      .platform-owner-auth-shell .po-logo{width:76px!important;height:58px!important;flex:0 0 76px!important;background:#fff!important;border:1px solid #dbe6f2!important;border-radius:14px!important;padding:4px!important;box-shadow:0 4px 12px rgba(15,23,42,.06)!important}
+      .platform-owner-auth-shell .po-brand-line span{font-size:24px!important;font-weight:850!important;color:#172b4d!important;line-height:1.1!important}
+      .platform-owner-auth-shell .po-console-label{font-size:14px!important;font-weight:800!important;color:#315f96!important;margin-top:3px!important}
+      .platform-owner-auth-shell .po-console-tagline{font-size:12px!important;font-weight:700!important;color:#0f8a5f!important;font-style:italic!important;margin-top:2px!important}
+      .platform-owner-auth-shell .po-user-meta{display:flex!important;align-items:center!important;justify-content:flex-end!important;gap:12px!important;flex:0 0 auto!important}
+      .platform-owner-auth-shell .subscription-new-plan h3{grid-column:1/-1!important;white-space:nowrap!important}
+      .platform-owner-auth-shell .platform-subscription-history{margin:14px 0 0!important;padding:14px!important;background:#f8fbff!important;border:1px solid #dbe5ef!important;border-radius:12px!important}
+      .platform-owner-auth-shell .platform-subscription-history .section-title-row{margin:0 0 10px!important;padding:0!important;background:transparent!important;border:0!important}
+      .platform-owner-auth-shell button:disabled{opacity:.58!important;cursor:wait!important;pointer-events:none!important}
+      @media(max-width:900px){
+        .platform-owner-auth-shell .po-top-header{padding:10px 16px!important}
+        .platform-owner-auth-shell .po-user-meta{gap:8px!important}
+        .platform-owner-auth-shell .po-brand-line span{font-size:20px!important}
+      }
+      @media(max-width:600px){
+        .platform-owner-auth-shell .po-top-header{align-items:flex-start!important}
+        .platform-owner-auth-shell .po-brand-block{gap:9px!important}
+        .platform-owner-auth-shell .po-logo{width:58px!important;height:46px!important;flex-basis:58px!important}
+        .platform-owner-auth-shell .po-brand-line span{font-size:17px!important}
+        .platform-owner-auth-shell .po-console-label{font-size:12px!important}
+        .platform-owner-auth-shell .po-console-tagline{font-size:10px!important}
+      }
+
+      /* Product Owner plan builder — trial duration is part of the plan, not a hidden global default. */
+      .subscription-new-plan{display:grid!important;grid-template-columns:1fr 1.15fr 1.8fr 1fr 1fr auto 120px 125px auto!important;gap:10px!important;align-items:end!important}
+      .subscription-new-plan h3{grid-column:1/-1!important;margin:0 0 2px!important}
+      .subscription-new-plan input,.subscription-new-plan select{width:100%!important;min-width:0!important;box-sizing:border-box!important}
+      .subscription-new-plan .trial-plan-toggle{display:inline-flex!important;align-items:center!important;gap:7px!important;min-height:42px!important;white-space:nowrap!important;font-weight:800!important;color:#334e6f!important}
+      .subscription-new-plan .trial-plan-toggle input{width:16px!important;height:16px!important;min-width:16px!important}
+      .subscription-new-plan .trial-plan-help{grid-column:1/-1!important;color:#64748b!important;font-size:.78rem!important;margin-top:0!important}
+      .subscription-new-plan input:disabled,.subscription-new-plan select:disabled{background:#f1f5f9!important;color:#94a3b8!important}
+      @media(max-width:1250px){.main .dashboard-kpis{grid-template-columns:repeat(3,minmax(0,1fr))!important}.subscription-new-plan{grid-template-columns:repeat(4,minmax(0,1fr))!important}.subscription-new-plan h3,.subscription-new-plan .trial-plan-help{grid-column:1/-1!important}}
+      @media(max-width:800px){.main{padding-left:12px!important;padding-right:12px!important}.main>.identity-header,.main>.header-divider{margin-left:-12px!important;margin-right:-12px!important}.main>.identity-header{padding-left:16px!important;padding-right:16px!important}.main .dashboard-kpis{grid-template-columns:1fr 1fr!important}.main .premium-donut-chart{width:210px!important;height:210px!important;min-width:210px!important;min-height:210px!important;max-width:210px!important;max-height:210px!important;flex-basis:210px!important}.subscription-new-plan{grid-template-columns:1fr 1fr!important}.subscription-new-plan h3,.subscription-new-plan .trial-plan-help{grid-column:1/-1!important}.subscription-new-plan button{grid-column:1/-1!important}}
+      @media(max-width:520px){.main .dashboard-kpis{grid-template-columns:1fr!important}.subscription-new-plan{grid-template-columns:1fr!important}.subscription-new-plan h3,.subscription-new-plan .trial-plan-help,.subscription-new-plan button{grid-column:auto!important}.platform-owner-auth-shell .auth-brand-copy{display:block!important}.platform-owner-auth-shell .auth-brand-copy p,.platform-owner-auth-shell .auth-brand-copy em{display:block!important;margin-top:4px!important}}
+      /* V6.5.13 CLEAN UI BUILD 4 — explicit assignment, utility editor, workspace and action consistency */
+      .platform-owner-auth-shell .po-top-header .po-brand-block{display:none!important}
+      .platform-owner-auth-shell .po-top-header{justify-content:flex-end!important}
+      .platform-owner-auth-shell .platform-owner-console button{min-height:38px!important;border-radius:9px!important;font-weight:750!important;transition:transform .14s ease,box-shadow .14s ease,background .14s ease!important}
+      .platform-owner-auth-shell .platform-owner-console button:active{transform:translateY(1px)!important}
+      .platform-owner-auth-shell .platform-owner-console button:disabled{opacity:.58!important;cursor:not-allowed!important;transform:none!important}
+      .shell .main{min-height:100vh!important}
+      .sidebar{min-height:100vh!important}
+      .sidebar .user-session button{min-height:38px!important;border-radius:9px!important;font-weight:750!important}
+      .sidebar nav{min-height:calc(100vh - 190px)!important}
+      .platform-owner-auth-shell .po-top-header{justify-content:flex-end!important;min-height:68px!important}
+      .platform-owner-auth-shell .po-page-header{padding-top:18px!important;padding-bottom:16px!important}
+      .platform-owner-auth-shell .subscription-plan-assignment{display:flex!important;align-items:center!important;gap:7px!important;min-width:245px!important}
+      .platform-owner-auth-shell .subscription-plan-assignment select{flex:1 1 auto!important;min-width:145px!important}
+      .platform-owner-auth-shell .assign-plan-button{min-width:72px!important;white-space:nowrap!important}
+      .platform-owner-auth-shell .subscription-actions button{min-height:36px!important;padding:7px 11px!important}
+      .sidebar{min-height:100vh!important;height:100vh!important;overflow-y:auto!important;overflow-x:hidden!important;scrollbar-width:thin!important}
+      .sidebar nav{padding-top:8px!important;padding-bottom:20px!important}
+      .sidebar nav button{min-height:48px!important;margin:4px 0!important;padding:11px 13px!important}
+      .sidebar .user-session button.secondary{display:flex!important;align-items:center!important;justify-content:center!important;width:100%!important;min-height:40px!important;border-radius:10px!important;background:#fff!important;color:#26364d!important;border:1px solid #cbd7e5!important;font-weight:800!important;box-shadow:0 3px 9px rgba(15,23,42,.12)!important}
+      .sidebar .user-session button.secondary:hover{background:#eef5ff!important;border-color:#8fb2e8!important;transform:translateY(-1px)!important}
+      .utility-category-editor{display:grid!important;grid-template-columns:minmax(220px,1fr) auto auto!important;gap:10px!important;align-items:center!important;padding:12px!important;background:#f8fbff!important;border:1px solid #dbe5ef!important;border-radius:12px!important}
+      .utility-category-editor input{min-width:0!important}
+      @media(max-width:700px){.platform-owner-auth-shell .subscription-plan-assignment{min-width:0!important;flex-direction:column!important;align-items:stretch!important}.platform-owner-auth-shell .subscription-plan-assignment select,.platform-owner-auth-shell .assign-plan-button{width:100%!important}.utility-category-editor{grid-template-columns:1fr!important}.sidebar nav button{min-height:44px!important}}
+
+      `}
 </style>
       <header className="identity-header">
         <section className="apartment-brand">
-          {settingsForm.apartment_photo_path?<img src={`${API}${settingsForm.apartment_photo_path}`} alt="Apartment profile" className="identity-photo"/>:<div className="building-icon">🏢</div>}
+          {(settingsForm.apartment_photo_path||settingsForm.apartment_photo_data_url)?<img src={settingsForm.apartment_photo_data_url||`${API}${settingsForm.apartment_photo_path}`} alt="Apartment profile" className="identity-photo"/>:<div className="building-icon">🏢</div>}
           <div><h2>{settingsForm.apartment_name||'Apartment'}</h2>{accountId&&<p className="account-context">Account: <b>{accountDisplay(accountId,settingsForm.country,settingsForm.state)}</b></p>}<p>{settingsForm.address||'Apartment address not set'}</p><p>{[settingsForm.city,settingsForm.state,settingsForm.pin_code,settingsForm.country].filter(Boolean).join(', ')}</p></div>
         </section>
         <section className="app-brand">
@@ -3011,7 +3439,7 @@ input[type="checkbox"]{
 
         <div className="dashboard-for">Dashboard for: {period==='Monthly'?month:year}</div>
 
-        <section className="kpis premium-kpis">
+        <section className="kpis premium-kpis dashboard-kpis">
           {dashboardCards.map(([label,value],index)=>
             <div className={`card kpi-card kpi-${index+1}`} key={label}>
               <div className="label">{label}</div>
@@ -3150,8 +3578,8 @@ input[type="checkbox"]{
       {tab==='Utilities' && <>
         <div className="page-title-row"><div><h1>Utilities</h1><p className="subtitle">Shared apartment service contacts. Admin and Viewer can add and edit contacts and categories. Delete/deactivate actions remain Admin-only; Watchman remains managed from Settings.</p></div><button type="button" className="secondary" onClick={loadUtilityContacts}>↻ Refresh</button></div>
         {utilityMessage&&<div className="message">{utilityMessage}</div>}
-        <section className="panel utility-panel utility-category-compact"><div className="section-title-row"><div><h2>Utility Categories</h2><p className="help-text">Use <b>Add Category</b> only when a new service category is required. Category history remains maintained by the system.</p></div><button type="button" className="secondary" disabled={!canEditUtilities(currentUser)} onClick={()=>{setEditingUtilityCategoryId(null);setUtilityCategoryName('');setUtilityMessage('Enter a new Utility Category below.')}}>＋ Add Category</button></div>
-          {(utilityCategoryName!==''||editingUtilityCategoryId)&&<div className="utility-category-editor"><input value={utilityCategoryName} onChange={e=>setUtilityCategoryName(e.target.value)} placeholder="Category name, e.g. Painter"/><button type="button" disabled={!canEditUtilities(currentUser)} onClick={saveUtilityCategory}>{editingUtilityCategoryId?'💾 Update Category':'＋ Save Category'}</button><button type="button" className="secondary" onClick={()=>{setEditingUtilityCategoryId(null);setUtilityCategoryName('');}}>Cancel</button></div>}
+        <section className="panel utility-panel utility-category-compact"><div className="section-title-row"><div><h2>Utility Categories</h2><p className="help-text">Use <b>Add Category</b> only when a new service category is required. Category history remains maintained by the system.</p></div><button type="button" className="secondary" disabled={!canEditUtilities(currentUser)} onClick={()=>{setEditingUtilityCategoryId(null);setUtilityCategoryName('');setUtilityCategoryEditorOpen(true);setUtilityMessage('Enter a new Utility Category below.')}}>＋ Add Category</button></div>
+          {(utilityCategoryEditorOpen||editingUtilityCategoryId)&&<div className="utility-category-editor"><input value={utilityCategoryName} onChange={e=>setUtilityCategoryName(e.target.value)} placeholder="Category name, e.g. Painter"/><button type="button" disabled={!canEditUtilities(currentUser)} onClick={saveUtilityCategory}>{editingUtilityCategoryId?'💾 Update Category':'＋ Save Category'}</button><button type="button" className="secondary" onClick={()=>{setEditingUtilityCategoryId(null);setUtilityCategoryName('');setUtilityCategoryEditorOpen(false);}}>Cancel</button></div>}
         </section>
         <section className="panel utility-panel"><div className="section-title-row"><div><h2>{editingUtilityId?'Edit Utility Contact':'Add Utility Contact'}</h2><p className="help-text">Keep important service numbers available to residents and management.</p></div></div>
           <form onSubmit={saveUtilityContact} className="utility-form">
@@ -3243,7 +3671,7 @@ input[type="checkbox"]{
           <h2>Default Monthly Charges</h2>
           <p className="help-text">These values are copied into a new month. Changing Settings does not alter already generated maintenance records.</p>
           <form onSubmit={saveSettings} className="resident-form">
-            <div className="apartment-photo-settings professional-upload"><div className="upload-widget-icon">🖼️</div><div className="upload-widget-copy"><b>Apartment Profile Photo</b><small>JPG, PNG or WEBP • Maximum 5 MB</small></div><label className="upload-button">Choose File<input type="file" accept="image/jpeg,image/png,image/webp" onChange={e=>{const file=e.target.files?.[0];if(file)uploadApartmentPhoto(file)}}/></label>{settingsForm.apartment_photo_path&&<img src={`${API}${settingsForm.apartment_photo_path}`} alt="Apartment profile" className="apartment-profile-photo"/>}</div>
+            <div className="apartment-photo-settings professional-upload"><div className="upload-widget-icon">🖼️</div><div className="upload-widget-copy"><b>Apartment Profile Photo</b><small>JPG, PNG or WEBP • Maximum 5 MB</small></div><label className="upload-button">Choose File<input type="file" accept="image/jpeg,image/png,image/webp" onChange={e=>{const file=e.target.files?.[0];if(file)uploadApartmentPhoto(file)}}/></label>{(settingsForm.apartment_photo_path||settingsForm.apartment_photo_data_url)&&<img src={settingsForm.apartment_photo_data_url||`${API}${settingsForm.apartment_photo_path}`} alt="Apartment profile" className="apartment-profile-photo"/>}</div>
             <label>Apartment Name
               <input value={settingsForm.apartment_name} onChange={e=>setSettingsForm({...settingsForm,apartment_name:e.target.value})}/>
             </label>

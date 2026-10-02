@@ -29,7 +29,7 @@ For Vercel same-origin deployment, leave `NEXT_PUBLIC_API_BASE` empty. The front
 
 ## Vercel
 
-Deploy this folder as the Vercel project root. Vercel serves Next.js at `/` and the FastAPI app through `/api/*` using `api/index.py`.
+Deploy this folder as the Vercel project root. The Vercel Root Directory should be **`.` (repository root)** when these folders are at repository root. If the entire package is intentionally placed under a `Preprod/` folder, then use **`Preprod`** as the Vercel Root Directory. Do not point Vercel at a nested `app/` or `backend/` folder. Vercel serves Next.js at `/` and the FastAPI app through `/api/*` using `api/index.py`.
 
 Recommended environment variables:
 
