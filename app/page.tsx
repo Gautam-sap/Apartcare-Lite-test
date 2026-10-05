@@ -90,13 +90,19 @@ const downloadExcelTable=async(title:string, headers:string[], rows:any[][], fil
   const blob=new Blob(['\ufeff'+html],{type:'application/vnd.ms-excel;charset=utf-8'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=fileName.endsWith('.xls')?fileName:`${fileName}.xls`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
 };
 const tableScreenshotBlob=async(title:string, headers:string[], rows:any[][]):Promise<Blob>=>{
-  const cols=Math.max(1,headers.length);const cellW=Math.max(150,Math.floor(1500/cols));const width=cols*cellW+80;const rowH=42;const height=Math.max(250,185+(rows.length+1)*rowH);
+  const cols=Math.max(1,headers.length);const cellW=Math.max(150,Math.floor(1500/cols));const width=cols*cellW+80;const rowH=44;const height=Math.max(260,190+(rows.length+1)*rowH);
   const canvas=document.createElement('canvas');canvas.width=width*2;canvas.height=height*2;const ctx=canvas.getContext('2d')!;ctx.scale(2,2);
-  ctx.fillStyle='#ffffff';ctx.fillRect(0,0,width,height);ctx.fillStyle='#243447';ctx.font='700 24px Arial';ctx.fillText(title,40,42);ctx.font='13px Arial';ctx.fillStyle='#64748b';ctx.fillText('ApartCare Report',40,66);ctx.fillText('Your daily partner in property care.  •  GKMA Solutions',40,86);
+  // High-contrast WhatsApp export: keep the same report structure, but avoid the washed-out/light text seen on phones.
+  ctx.fillStyle='#ffffff';ctx.fillRect(0,0,width,height);
+  ctx.fillStyle='#102a43';ctx.font='700 25px Arial';ctx.fillText(title,40,42);
+  ctx.font='600 14px Arial';ctx.fillStyle='#334e68';ctx.fillText('ApartCare Report',40,67);
+  ctx.font='600 13px Arial';ctx.fillStyle='#243b53';ctx.fillText('Your daily partner in property care.  •  GKMA Solutions',40,88);
   try{const r=await fetch('/apartcare-lite-logo.png',{cache:'force-cache'});if(r.ok){const ib=await r.blob();const src=URL.createObjectURL(ib);const img=await new Promise<HTMLImageElement>((resolve,reject)=>{const im=new Image();im.onload=()=>{URL.revokeObjectURL(src);resolve(im)};im.onerror=reject;im.src=src;});ctx.drawImage(img,width-125,22,82,58);}}catch{}
-  const y0=105;ctx.fillStyle='#eaf0f6';ctx.fillRect(40,y0,width-80,rowH);ctx.strokeStyle='#cbd5e1';ctx.lineWidth=1;
-  const drawRow=(values:any[],y:number,bold=false)=>{for(let i=0;i<cols;i++){const x=40+i*cellW;ctx.strokeRect(x,y,cellW,rowH);ctx.fillStyle='#243447';ctx.font=`${bold?'700':'400'} 13px Arial`;const text=String(values[i]??'');ctx.save();ctx.beginPath();ctx.rect(x+8,y+4,cellW-16,rowH-8);ctx.clip();ctx.fillText(text,x+8,y+26);ctx.restore();}};
-  drawRow(headers,y0,true);rows.forEach((r,i)=>{if(i%2===1){ctx.fillStyle='#f8fafc';ctx.fillRect(40,y0+rowH*(i+1),width-80,rowH);}drawRow(r,y0+rowH*(i+1));});ctx.fillStyle='#64748b';ctx.font='11px Arial';ctx.fillText('ApartCare Lite  •  GKMA Solutions',40,height-16);
+  const y0=108;
+  ctx.fillStyle='#dbe7f3';ctx.fillRect(40,y0,width-80,rowH);ctx.strokeStyle='#94a3b8';ctx.lineWidth=1;
+  const drawRow=(values:any[],y:number,bold=false)=>{for(let i=0;i<cols;i++){const x=40+i*cellW;ctx.strokeRect(x,y,cellW,rowH);ctx.fillStyle='#102a43';ctx.font=`${bold?'700':'500'} ${bold?'13':'13'}px Arial`;const text=String(values[i]??'');ctx.save();ctx.beginPath();ctx.rect(x+8,y+4,cellW-16,rowH-8);ctx.clip();ctx.fillText(text,x+8,y+27);ctx.restore();}};
+  drawRow(headers,y0,true);rows.forEach((r,i)=>{if(i%2===1){ctx.fillStyle='#f1f5f9';ctx.fillRect(40,y0+rowH*(i+1),width-80,rowH);}drawRow(r,y0+rowH*(i+1));});
+  ctx.fillStyle='#334e68';ctx.font='600 12px Arial';ctx.fillText('ApartCare Lite  •  GKMA Solutions',40,height-16);
   return await new Promise(resolve=>canvas.toBlob(b=>resolve(b!), 'image/png'));
 };
 const shareReportViaWhatsApp=async(title:string, message:string, blob?:Blob, filename='ApartCare_Report.png')=>{
@@ -304,6 +310,7 @@ export default function Home(){
   const importFileInputRef=useRef<HTMLInputElement|null>(null);
   const [importLoading,setImportLoading]=useState(false);
   const [importMessage,setImportMessage]=useState('');
+  const [importErrors,setImportErrors]=useState<string[]>([]);
   const [paymentForms,setPaymentForms]=useState<Record<string,{paid_amount:number,payment_mode:string,reference:string,payment_date:string,remarks:string,status:'Paid'|'Pending'}>>({});
   const [dashboardKpis,setDashboardKpis]=useState<DashboardKpis|null>(null);
   const [waterHeader,setWaterHeader]=useState<WaterHeader|null>(null);
