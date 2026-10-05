@@ -1,25 +1,31 @@
-# V6.5.14 Build Status
+# ApartCare Lite V6.5.14 — Build Status
 
-Version: 6.5.14
+Version: 6.5.14 — Production Stabilization
 
-Validated in the build workspace:
-- TypeScript: `tsc --noEmit` PASS
-- Python syntax: `python -m py_compile backend/app/main.py` PASS
+Validated in this build workspace:
+- Python syntax: PASS (`python -m py_compile backend/app/main.py backend/main.py api/index.py`)
+- JSON syntax: PASS (`package.json`, `vercel.json`)
+- Tenant-read audit: PASS — all property GET endpoints require an authenticated ApartCare token and resolve tenant scope from the session.
+- Tenant-write hardening: PASS — resident, payment, expense, watchman, maintenance and apartment-photo writes force the authenticated tenant namespace.
+- Per Unit Price: rounds upward to the next whole value (57.39 -> 58).
+- Apartment photo: controlled display size with Update/Remove support.
+- First-login password change and password-reset/welcome-email framework included.
+- Report branding and print-water-report layout included.
 
-The final `next build` must be run on the Windows development machine or Vercel because this workspace does not have the Linux Next.js SWC native package and external package download is disabled.
+The final Next.js production build must still be run on the Windows development machine or Vercel because this workspace could not complete the npm package installation required for the native Next.js build worker.
 
-## Windows validation
+Windows validation:
 ```bat
 npm install
 npm run build
 ```
 
-Then test:
-1. Create a fresh apartment account.
-2. Log in with the initial password and confirm the mandatory Change Password screen.
-3. Create a Viewer/Supervisor and confirm the welcome email and forced password change.
-4. Log out and log into a second account; confirm Settings shows only the second tenant values.
-5. Upload, Update and Remove the apartment photo.
-6. Generate maintenance with Per Unit Price 57.39-equivalent and confirm the displayed rate is 58.
-7. Download Image/Excel/WhatsApp report and verify ApartCare Lite + tagline + GKMA Solutions branding.
-8. Print All Flats Monthly Report and verify only Water Summary + Water Detail table are printed.
+Mandatory regression test after build:
+1. Create Account A with unique Settings / Opening Balance values.
+2. Create Account B with different values.
+3. Log into A, then log out and log into B.
+4. Verify Settings, Dashboard, Maintenance, Payments, Expenses, Utilities and Reports contain only B data.
+5. Attempt Account B token + Account A tenant/apartment ID on property APIs; expected HTTP 403.
+6. Verify photo upload/update/remove is tenant-scoped.
+7. Verify first-login password change and password-reset email.
+8. Verify All Flats Monthly Report print contains only Water Summary + Water Detail table with both apartment and app branding.

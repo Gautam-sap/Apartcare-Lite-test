@@ -67,7 +67,7 @@ async def app(scope, receive, send):
     if public_path == "/health":
         await _json_response(send, 200, {
             "status": "ok",
-            "version": "6.5.13",
+            "version": "6.5.14",
             "build": "CLEAN_UI_BUILD_4",
             "service": "apartcare-fastapi",
             "runtime": "vercel-services",

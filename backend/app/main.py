@@ -34,7 +34,7 @@ except Exception:
 from email.message import EmailMessage
 from pydantic import BaseModel, Field, model_validator
 
-app = FastAPI(title="ApartCare2 API", version="6.5.13-CLEAN-UI-BUILD-4")
+app = FastAPI(title="ApartCare2 API", version="6.5.14-PRODUCTION-STABILIZATION")
 
 
 @app.middleware("http")
@@ -616,7 +616,7 @@ def health():
     if not persistent:
         return {
             "status": "ok",
-            "version": "6.5.13",
+            "version": "6.5.14",
             "storage": "local",
             "database": "not_configured",
             "production_ready": False,
@@ -633,7 +633,7 @@ def health():
             conn.close()
         return {
             "status": "ok",
-            "version": "6.5.13",
+            "version": "6.5.14",
             "storage": "postgres",
             "database": "connected",
             "production_ready": True,
@@ -641,7 +641,7 @@ def health():
     except Exception as exc:
         return JSONResponse(status_code=503, content={
             "status": "degraded",
-            "version": "6.5.13",
+            "version": "6.5.14",
             "storage": "postgres",
             "database": "unavailable",
             "production_ready": False,
@@ -660,7 +660,8 @@ def resident_version_for_month(apartment_id: str, flat_no: str, month_key: str|N
     return max(candidates,key=lambda h:(h.version,h.effective_from)).version if candidates else min(hist,key=lambda h:(h.version,h.effective_from)).version
 
 @app.get("/residents", response_model=list[Resident])
-def list_residents(apartment_id: str="demo-apartment"):
+def list_residents(apartment_id: str="demo-apartment", x_apartcare_token: str | None = Header(default=None)):
+    apartment_id = _resolved_actor_tenant(x_apartcare_token, apartment_id)
     return sorted([r for r in residents if r.apartment_id==apartment_id],key=lambda r:r.flat_no.lower())
 
 @app.get("/residents/{resident_id}/history", response_model=list[FlatHistory])
@@ -673,7 +674,9 @@ def resident_record_history(resident_id: str, apartment_id: str = "demo-apartmen
 
 @app.post("/residents", response_model=Resident, status_code=201)
 def create_resident(data: ResidentInput, x_apartcare_token: str | None = Header(default=None)):
-    _require_write_role(x_apartcare_token)
+    actor = _require_write_role(x_apartcare_token)
+    data.apartment_id = _actor_apartment_id(actor)
+    data.tenant_id = data.apartment_id
     if any(r.apartment_id==data.apartment_id and r.flat_no.lower()==data.flat_no.lower() for r in residents):
         raise HTTPException(status_code=409,detail="A resident record already exists for this Flat No. Edit the existing record to create a new version.")
     resident=Resident(id=str(uuid4()),version=1,**data.model_dump()); residents.append(resident)
@@ -684,6 +687,8 @@ def create_resident(data: ResidentInput, x_apartcare_token: str | None = Header(
 def update_resident(resident_id: str,data: ResidentInput, x_apartcare_token: str | None = Header(default=None)):
     actor = _require_write_role(x_apartcare_token)
     tenant_id = _actor_apartment_id(actor)
+    data.apartment_id = tenant_id
+    data.tenant_id = tenant_id
     for index,resident in enumerate(residents):
         if resident.id==resident_id and resident.apartment_id==tenant_id:
             if data.flat_no.lower()!=resident.flat_no.lower() and any(r.apartment_id==resident.apartment_id and r.flat_no.lower()==data.flat_no.lower() for r in residents if r.id!=resident_id):
@@ -915,20 +920,24 @@ def ensure_global_month_editable(apartment_id: str, month_key: str):
     ensure_payment_month_editable(apartment_id, month_key)
 
 @app.get("/payments/lock-status")
-def payment_lock_status(month_key: str, apartment_id: str = "demo-apartment"):
+def payment_lock_status(month_key: str, apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
+    apartment_id = _resolved_actor_tenant(x_apartcare_token, apartment_id)
     if not month_key_valid(month_key):
         raise HTTPException(status_code=400, detail="Month must be YYYY-MM")
     lock = payment_month_lock(apartment_id, month_key)
     return {"apartment_id": apartment_id, "month_key": month_key, "locked": bool(lock and lock.get("locked")), "lock": lock}
 
 @app.get("/payments/lock-history")
-def payment_lock_history(month_key: str|None = None, apartment_id: str = "demo-apartment"):
+def payment_lock_history(month_key: str|None = None, apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
+    apartment_id = _resolved_actor_tenant(x_apartcare_token, apartment_id)
     rows=[h for h in payment_lock_events if h.get("apartment_id")==apartment_id and (not month_key or h.get("month_key")==month_key)]
     return sorted(rows,key=lambda h:h.get("at", ""),reverse=True)
 
 @app.post("/payments/lock")
 def lock_payment_month(data: PaymentMonthLockInput, x_apartcare_token: str|None = Header(default=None)):
     actor=_require_role(x_apartcare_token,{"Admin"})
+    data.apartment_id = _actor_apartment_id(actor)
+    data.tenant_id = data.apartment_id
     if not month_key_valid(data.month_key):
         raise HTTPException(status_code=400, detail="Month must be YYYY-MM")
     key=(data.apartment_id,data.month_key)
@@ -945,6 +954,8 @@ def lock_payment_month(data: PaymentMonthLockInput, x_apartcare_token: str|None 
 @app.post("/payments/unlock")
 def unlock_payment_month(data: PaymentMonthLockInput, x_apartcare_token: str|None = Header(default=None)):
     actor=_require_role(x_apartcare_token,{"Admin"})
+    data.apartment_id = _actor_apartment_id(actor)
+    data.tenant_id = data.apartment_id
     if not month_key_valid(data.month_key):
         raise HTTPException(status_code=400, detail="Month must be YYYY-MM")
     key=(data.apartment_id,data.month_key); existing=payment_month_locks.get(key)
@@ -957,7 +968,8 @@ def unlock_payment_month(data: PaymentMonthLockInput, x_apartcare_token: str|Non
     return existing
 
 @app.get("/payments", response_model=list[Payment])
-def list_payments(month_key: str, apartment_id: str = "demo-apartment"):
+def list_payments(month_key: str, apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
+    apartment_id = _resolved_actor_tenant(x_apartcare_token, apartment_id)
     if not month_key_valid(month_key):
         raise HTTPException(status_code=400, detail="Month must be YYYY-MM")
     rows = get_month_rows(apartment_id, month_key)
@@ -993,7 +1005,9 @@ def list_payments(month_key: str, apartment_id: str = "demo-apartment"):
 
 @app.post("/payments", response_model=Payment)
 def record_payment(data: PaymentInput, x_apartcare_token: str | None = Header(default=None)):
-    _require_write_role(x_apartcare_token)
+    actor = _require_write_role(x_apartcare_token)
+    data.apartment_id = _actor_apartment_id(actor)
+    data.tenant_id = data.apartment_id
     ensure_payment_month_editable(data.apartment_id, data.month_key)
     rows = month_rows_for_flat(data.apartment_id, data.flat_no, data.month_key)
     if not rows:
@@ -1041,7 +1055,9 @@ def record_payment(data: PaymentInput, x_apartcare_token: str | None = Header(de
 
 @app.put("/payments", response_model=Payment)
 def save_or_correct_payment(data: PaymentInput, x_apartcare_token: str | None = Header(default=None)):
-    _require_write_role(x_apartcare_token)
+    actor = _require_write_role(x_apartcare_token)
+    data.apartment_id = _actor_apartment_id(actor)
+    data.tenant_id = data.apartment_id
     ensure_payment_month_editable(data.apartment_id, data.month_key)
     """Save the cumulative paid amount for a flat/month.
 
@@ -1098,7 +1114,8 @@ def save_or_correct_payment(data: PaymentInput, x_apartcare_token: str | None = 
     return payment
 
 @app.get("/payments/summary")
-def payments_summary(month_key: str, apartment_id: str = "demo-apartment"):
+def payments_summary(month_key: str, apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
+    apartment_id = _resolved_actor_tenant(x_apartcare_token, apartment_id)
     normalize_payments()
     rows = get_month_rows(apartment_id, month_key)
     current_total = round(sum(r.rounded_total for r in rows), 2)
@@ -1117,7 +1134,8 @@ def payments_summary(month_key: str, apartment_id: str = "demo-apartment"):
     }
 
 @app.get("/dashboard/kpis")
-def dashboard_kpis(month_key: str | None = None, year: str | None = None, period: str = "Monthly", apartment_id: str = "demo-apartment"):
+def dashboard_kpis(month_key: str | None = None, year: str | None = None, period: str = "Monthly", apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
+    apartment_id = _resolved_actor_tenant(x_apartcare_token, apartment_id)
     normalize_payments()
     # Dashboard supports both month and year selections. Always calculate from
     # the selected period; never retain a previous period's values.
@@ -1170,7 +1188,8 @@ def dashboard_kpis(month_key: str | None = None, year: str | None = None, period
 
 # ---------- Expenses / Fund Management ----------
 @app.get("/expenses", response_model=list[Expense])
-def list_expenses(month_key: str, apartment_id: str = "demo-apartment"):
+def list_expenses(month_key: str, apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
+    apartment_id = _resolved_actor_tenant(x_apartcare_token, apartment_id)
     if not month_key_valid(month_key):
         raise HTTPException(status_code=400, detail="Month must be YYYY-MM")
     # Keep deleted rows visible in the register for audit. They are excluded from
@@ -1178,14 +1197,17 @@ def list_expenses(month_key: str, apartment_id: str = "demo-apartment"):
     return [e for e in expenses if e.apartment_id==apartment_id and e.month_key==month_key]
 
 @app.get("/expenses/summary", response_model=ExpenseSummary)
-def expenses_summary(month_key: str, apartment_id: str = "demo-apartment"):
+def expenses_summary(month_key: str, apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
+    apartment_id = _resolved_actor_tenant(x_apartcare_token, apartment_id)
     if not month_key_valid(month_key):
         raise HTTPException(status_code=400, detail="Month must be YYYY-MM")
     return ExpenseSummary(**expense_summary_data(apartment_id, month_key))
 
 @app.post("/expenses", response_model=Expense, status_code=201)
 def create_expense(data: ExpenseInput, x_apartcare_token: str | None = Header(default=None)):
-    _require_write_role(x_apartcare_token)
+    actor = _require_write_role(x_apartcare_token)
+    data.apartment_id = _actor_apartment_id(actor)
+    data.tenant_id = data.apartment_id
     # A Payment month lock is the global financial freeze.
     ensure_global_month_editable(data.apartment_id, canonical_expense_month(data.expense_date))
     # Data-integrity rule: expense month always comes from the actual expense date.
@@ -1252,7 +1274,8 @@ def delete_expense(expense_id: str, reason: str = "", x_apartcare_token: str | N
     raise HTTPException(status_code=404, detail="Expense not found")
 
 @app.get("/expenses/history", response_model=list[ExpenseDeletionHistory])
-def expense_history(month_key: str | None = None, apartment_id: str = "demo-apartment"):
+def expense_history(month_key: str | None = None, apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
+    apartment_id = _resolved_actor_tenant(x_apartcare_token, apartment_id)
     rows = []
     seen = set()
     changed = False
@@ -1283,7 +1306,8 @@ def generate_watchman_expense(month_key: str, apartment_id: str = "demo-apartmen
     return ensure_watchman_expense(apartment_id, month_key)
 
 @app.get("/expenses/lock-history")
-def expense_lock_history(month_key: str|None=None, category: str="", apartment_id: str="demo-apartment"):
+def expense_lock_history(month_key: str|None=None, category: str="", apartment_id: str="demo-apartment", x_apartcare_token: str|None=Header(default=None)):
+    apartment_id = _resolved_actor_tenant(x_apartcare_token, apartment_id)
     return sorted([h for h in expense_lock_events if h.get("apartment_id")==apartment_id and (not month_key or h.get("month_key")==month_key) and (not category or h.get("category")==category)], key=lambda h:h.get("at",""), reverse=True)
 
 @app.post("/expenses/{expense_id}/lock", response_model=Expense)
@@ -1308,23 +1332,20 @@ def lock_expense(expense_id: str, locked: bool=True, reason: str="", x_apartcare
 @app.get("/settings/charges", response_model=ChargeSettings)
 def get_charge_settings(apartment_id: str = "demo-apartment", tenant_id: str = "", x_apartcare_token: str | None = Header(default=None)):
     requested = str(tenant_id or apartment_id or "demo-apartment")
-    if x_apartcare_token:
-        actor=_current_actor(x_apartcare_token)
-        canonical=_actor_apartment_id(actor)
-        if requested not in {canonical, "", "demo-apartment"}:
-            raise HTTPException(status_code=403, detail="Tenant context mismatch.")
-        requested=canonical
-    return charge_settings.get(requested, ChargeSettings(apartment_id=requested, tenant_id=requested))
+    canonical = _resolved_actor_tenant(x_apartcare_token, requested)
+    return charge_settings.get(canonical, ChargeSettings(apartment_id=canonical, tenant_id=canonical))
 
 @app.get("/settings/charges/effective")
-def get_effective_charge_settings(month_key: str, apartment_id: str = "demo-apartment"):
+def get_effective_charge_settings(month_key: str, apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
+    apartment_id = _resolved_actor_tenant(x_apartcare_token, apartment_id)
     if not month_key_valid(month_key):
         raise HTTPException(status_code=400, detail="Month must be YYYY-MM")
     maint,cca,effective=effective_charge_defaults(apartment_id,month_key)
     return {"tenant_id":apartment_id,"apartment_id":apartment_id,"month_key":month_key,"common_maintenance":maint,"cca":cca,"effective_month":effective}
 
 @app.get("/settings/charge-history", response_model=list[ChargeHistory])
-def get_charge_history(apartment_id: str = "demo-apartment"):
+def get_charge_history(apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
+    apartment_id = _resolved_actor_tenant(x_apartcare_token, apartment_id)
     return sorted([h for h in charge_history if h.apartment_id==apartment_id], key=lambda h:(h.effective_month,h.version,h.changed_at), reverse=True)
 
 @app.put("/settings/charges", response_model=ChargeSettings)
@@ -1351,7 +1372,10 @@ def save_charge_settings(data: ChargeSettings, effective_month: str = "", x_apar
 
 @app.post("/settings/apartment-photo", response_model=ChargeSettings)
 def save_apartment_photo(data: ApartmentPhotoInput, x_apartcare_token: str | None = Header(default=None)):
-    _require_role(x_apartcare_token,{"Admin"})
+    actor = _require_role(x_apartcare_token,{"Admin"})
+    canonical = _actor_apartment_id(actor)
+    data.apartment_id = canonical
+    data.tenant_id = canonical
     try:
         encoded = data.photo_data_url.split(",", 1)[1] if "," in data.photo_data_url else data.photo_data_url
         raw = base64.b64decode(encoded)
@@ -1435,12 +1459,15 @@ async def serve_uploaded_file(filename: str):
 
 # ---------- Settings: Watchman and Go-Live ----------
 @app.get("/settings/watchmen", response_model=list[Watchman])
-def list_watchmen(apartment_id: str = "demo-apartment", include_deleted: bool = False):
+def list_watchmen(apartment_id: str = "demo-apartment", include_deleted: bool = False, x_apartcare_token: str | None = Header(default=None)):
+    apartment_id = _resolved_actor_tenant(x_apartcare_token, apartment_id)
     return [w for w in watchmen if w.apartment_id == apartment_id and (include_deleted or not w.deleted)]
 
 @app.post("/settings/watchmen", response_model=Watchman, status_code=201)
 def create_watchman(data: WatchmanInput, x_apartcare_token: str | None = Header(default=None)):
-    _require_write_role(x_apartcare_token)
+    actor = _require_write_role(x_apartcare_token)
+    data.apartment_id = _actor_apartment_id(actor)
+    data.tenant_id = data.apartment_id
     row = Watchman(id=str(uuid4()), **data.model_dump())
     watchmen.append(row)
     watchman_history.append({"watchman_id": row.id, "action": "Created", "at": datetime.now().isoformat(timespec="seconds"), "data": row.model_dump()})
@@ -1490,7 +1517,8 @@ def soft_delete_watchman(watchman_id: str, reason: str = "Soft deleted by user",
     raise HTTPException(status_code=404, detail="Watchman not found")
 
 @app.get("/settings/watchmen/history")
-def get_watchman_history(apartment_id: str = "demo-apartment"):
+def get_watchman_history(apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
+    apartment_id = _resolved_actor_tenant(x_apartcare_token, apartment_id)
     ids={w.id for w in watchmen if w.apartment_id==apartment_id}
     return [h for h in watchman_history if h["watchman_id"] in ids]
 
@@ -1745,7 +1773,8 @@ def _financial_period_values(apartment_id: str, year: str):
     return rows, total_collected, total_expenses
 
 @app.get("/settings/opening-balance", response_model=OpeningBalance | None)
-def get_opening_balance(apartment_id: str = "demo-apartment"):
+def get_opening_balance(apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
+    apartment_id = _resolved_actor_tenant(x_apartcare_token, apartment_id)
     return opening_balances.get(apartment_id)
 
 @app.post("/settings/opening-balance", response_model=OpeningBalance)
@@ -1792,12 +1821,14 @@ def lock_opening_balance(justification: str = Body(..., embed=True), x_apartcare
     _save_state(); return row
 
 @app.get("/settings/opening-balance/history", response_model=list[OpeningBalanceHistory])
-def get_opening_balance_history(apartment_id: str = "demo-apartment"):
+def get_opening_balance_history(apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
+    apartment_id = _resolved_actor_tenant(x_apartcare_token, apartment_id)
     return [h for h in opening_balance_history if h.apartment_id==apartment_id]
 
 # ---------- Yearly Expense Reporting ----------
 @app.get("/expenses/yearly-summary")
-def yearly_expense_summary(year: str, apartment_id: str = "demo-apartment"):
+def yearly_expense_summary(year: str, apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
+    apartment_id = _resolved_actor_tenant(x_apartcare_token, apartment_id)
     if not (len(year) == 4 and year.isdigit()):
         raise HTTPException(status_code=400, detail="Year must be YYYY")
     months = [f"{year}-{i:02d}" for i in range(1, 13)]
@@ -1825,7 +1856,8 @@ def yearly_expense_summary(year: str, apartment_id: str = "demo-apartment"):
     }
 
 @app.get("/expenses/yearly-details")
-def yearly_expense_details(year: str, category: str = "", apartment_id: str = "demo-apartment"):
+def yearly_expense_details(year: str, category: str = "", apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
+    apartment_id = _resolved_actor_tenant(x_apartcare_token, apartment_id)
     if not (len(year) == 4 and year.isdigit()):
         raise HTTPException(status_code=400, detail="Year must be YYYY")
     rows = [e for e in expenses if e.apartment_id == apartment_id and e.month_key.startswith(f"{year}-") and expense_is_countable(e)]
@@ -1836,12 +1868,14 @@ def yearly_expense_details(year: str, category: str = "", apartment_id: str = "d
 
 # ---------- Reports ----------
 @app.get("/reports/all-flats-monthly")
-def all_flats_monthly_report(month_key: str, apartment_id: str = "demo-apartment"):
+def all_flats_monthly_report(month_key: str, apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
+    apartment_id = _resolved_actor_tenant(x_apartcare_token, apartment_id)
     rows = get_month_rows(apartment_id, month_key)
     return {"month_key": month_key, "rows": [r.model_dump() for r in rows], "totals": {"maintenance": round(sum(r.maintenance for r in rows),2), "cca": round(sum(r.cca for r in rows),2), "diesel": round(sum(r.diesel for r in rows),2), "water_units": round(sum(r.water_units for r in rows),2), "water": round(sum(r.water_amount for r in rows),2), "total": round(sum(r.rounded_total for r in rows),2)}}
 
 @app.get("/reports/yearly-collection-expenses")
-def yearly_collection_expenses(year: str, apartment_id: str = "demo-apartment"):
+def yearly_collection_expenses(year: str, apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
+    apartment_id = _resolved_actor_tenant(x_apartcare_token, apartment_id)
     normalize_payments()
     rows, total_collected, total_expenses = _financial_period_values(apartment_id, year)
     active_rows = [r for r in rows if not r["is_before_go_live"]]
@@ -1859,7 +1893,8 @@ def yearly_collection_expenses(year: str, apartment_id: str = "demo-apartment"):
     }
 
 @app.get("/reports/flats")
-def report_flats(apartment_id: str = "demo-apartment"):
+def report_flats(apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
+    apartment_id = _resolved_actor_tenant(x_apartcare_token, apartment_id)
     # Reports must include flats that exist in current residents as well as historical
     # maintenance/payment data. This prevents the report drop-down from becoming empty
     # when a resident was moved/deactivated but the flat still has financial history.
@@ -1870,7 +1905,8 @@ def report_flats(apartment_id: str = "demo-apartment"):
     return sorted(x for x in flats if x)
 
 @app.get("/reports/flat-statement")
-def flat_statement(flat_no: str, apartment_id: str = "demo-apartment"):
+def flat_statement(flat_no: str, apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
+    apartment_id = _resolved_actor_tenant(x_apartcare_token, apartment_id)
     normalize_payments()
     resident_hist=[h.model_dump() for h in flat_history if h.apartment_id==apartment_id and h.flat_no==flat_no]
     bills=[{"month_key":r.month_key,"type":"Maintenance","amount":r.rounded_total,"description":"Monthly maintenance bill"} for r in maintenance_rows if r.apartment_id==apartment_id and r.flat_no==flat_no]
@@ -1881,13 +1917,15 @@ def flat_statement(flat_no: str, apartment_id: str = "demo-apartment"):
     return {"flat_no":flat_no,"owner_name": (current.owner_name if current else latest.get("owner_name", "")),"resident_name": (current.resident_name if current else latest.get("resident_name", "")),"resident_history":resident_hist,"ledger":ledger}
 
 @app.get("/reports/individual-maintenance")
-def individual_maintenance_report(flat_no: str, apartment_id: str = "demo-apartment"):
+def individual_maintenance_report(flat_no: str, apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
+    apartment_id = _resolved_actor_tenant(x_apartcare_token, apartment_id)
     rows = [r for r in maintenance_rows if r.apartment_id == apartment_id and r.flat_no == flat_no]
     rows.sort(key=lambda r: r.month_key)
     return [r.model_dump() for r in rows]
 
 @app.get("/reports/yearly-maintenance")
-def yearly_maintenance_report(year: str, apartment_id: str = "demo-apartment"):
+def yearly_maintenance_report(year: str, apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
+    apartment_id = _resolved_actor_tenant(x_apartcare_token, apartment_id)
     if not (len(year) == 4 and year.isdigit()):
         raise HTTPException(status_code=400, detail="Year must be YYYY")
     rows = [r for r in maintenance_rows if r.apartment_id == apartment_id and r.month_key.startswith(f"{year}-")]
@@ -2024,18 +2062,22 @@ async def import_monthly_maintenance_excel(file: UploadFile = File(...), apartme
 
 # ---------- Monthly Maintenance ----------
 @app.get("/maintenance", response_model=list[MaintenanceRow])
-def list_maintenance(month_key: str, apartment_id: str = "demo-apartment"):
+def list_maintenance(month_key: str, apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
+    apartment_id = _resolved_actor_tenant(x_apartcare_token, apartment_id)
     if not month_key_valid(month_key):
         raise HTTPException(status_code=400, detail="Month must be YYYY-MM")
     return get_month_rows(apartment_id, month_key)
 
 @app.get("/maintenance/water-header", response_model=MonthWaterHeader | None)
-def get_water_header(month_key: str, apartment_id: str = "demo-apartment"):
+def get_water_header(month_key: str, apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
+    apartment_id = _resolved_actor_tenant(x_apartcare_token, apartment_id)
     return water_headers.get((apartment_id, month_key))
 
 @app.post("/maintenance/generate", response_model=list[MaintenanceRow])
 def generate_maintenance(data: MaintenanceGenerateInput, x_apartcare_token: str | None = Header(default=None)):
-    _require_write_role(x_apartcare_token)
+    actor = _require_write_role(x_apartcare_token)
+    data.apartment_id = _actor_apartment_id(actor)
+    data.tenant_id = data.apartment_id
     if not month_key_valid(data.month_key):
         raise HTTPException(status_code=400, detail="Month must be YYYY-MM")
     ensure_global_month_editable(data.apartment_id, data.month_key)
@@ -2119,7 +2161,9 @@ def update_maintenance(maintenance_id: str, data: MaintenanceUpdate, x_apartcare
 
 @app.put("/maintenance/water-header/{month_key}", response_model=MonthWaterHeader)
 def update_water_header(month_key: str, data: MaintenanceGenerateInput, x_apartcare_token: str | None = Header(default=None)):
-    _require_write_role(x_apartcare_token)
+    actor = _require_write_role(x_apartcare_token)
+    data.apartment_id = _actor_apartment_id(actor)
+    data.tenant_id = data.apartment_id
     ensure_global_month_editable(data.apartment_id, month_key)
     key = (data.apartment_id, month_key)
     header = water_headers.get(key)
@@ -2145,7 +2189,8 @@ def update_water_header(month_key: str, data: MaintenanceGenerateInput, x_apartc
     return header
 
 @app.get("/maintenance/summary")
-def maintenance_summary(month_key: str, apartment_id: str = "demo-apartment"):
+def maintenance_summary(month_key: str, apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
+    apartment_id = _resolved_actor_tenant(x_apartcare_token, apartment_id)
     rows = get_month_rows(apartment_id, month_key)
     header = water_headers.get((apartment_id, month_key))
     return {
@@ -2376,6 +2421,9 @@ def _require_role(token: str | None, allowed: set[str]) -> AdminUser:
 
 
 def _resolved_actor_tenant(token: str | None, requested_apartment_id: str = "demo-apartment") -> str:
+    # V6.5.14 Production Stabilization: all property data reads/writes resolve
+    # the namespace from the authenticated session. Browser-supplied tenant IDs
+    # are hints only and can never switch a session into another tenant.
     """Resolve property namespace from the authenticated session.
 
     For multi-apartment sessions, tenant_id is authoritative. A browser-supplied
@@ -3433,7 +3481,7 @@ async def razorpay_webhook(request: Request):
 
 @app.get('/platform/status')
 def platform_status():
-    return {"initialized": platform_owner is not None, "version":"6.5.13", "tenant_count":len(tenant_accounts), "subscription_count":len(subscriptions)}
+    return {"initialized": platform_owner is not None, "version":"6.5.14", "tenant_count":len(tenant_accounts), "subscription_count":len(subscriptions)}
 
 @app.post('/platform/bootstrap')
 def platform_bootstrap(data: PlatformBootstrapInput, background_tasks: BackgroundTasks):
