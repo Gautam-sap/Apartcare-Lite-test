@@ -301,6 +301,7 @@ export default function Home(){
   const [selectedPaymentFlats,setSelectedPaymentFlats]=useState<string[]>([]);
   const [importType,setImportType]=useState<'residents'|'maintenance'>('residents');
   const [importFile,setImportFile]=useState<File|null>(null);
+  const importFileInputRef=useRef<HTMLInputElement|null>(null);
   const [importLoading,setImportLoading]=useState(false);
   const [importMessage,setImportMessage]=useState('');
   const [paymentForms,setPaymentForms]=useState<Record<string,{paid_amount:number,payment_mode:string,reference:string,payment_date:string,remarks:string,status:'Paid'|'Pending'}>>({});
