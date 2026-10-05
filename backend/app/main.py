@@ -576,7 +576,7 @@ def recalculate_month(apartment_id: str, month_key: str) -> None:
     if mode == "No Meter":
         configured_flats = int(charge_settings.get(apartment_id, ChargeSettings(apartment_id=apartment_id)).no_of_flats or 0)
         divisor = configured_flats if configured_flats > 0 else len(rows)
-        rate = round(total_cost / divisor, 2) if divisor > 0 else 0.0
+        rate = ceil(total_cost / divisor) if divisor > 0 else 0.0
         total_units = 0.0
         for r in rows:
             r.water_units = 0.0
@@ -586,7 +586,7 @@ def recalculate_month(apartment_id: str, month_key: str) -> None:
         for r in rows:
             r.water_units = max(0.0, round(float(r.current_reading) - float(r.previous_reading), 2))
         total_units = round(sum(r.water_units for r in rows), 2)
-        rate = round(total_cost / total_units, 4) if total_units > 0 else 0.0
+        rate = ceil(total_cost / total_units) if total_units > 0 else 0.0
         for r in rows:
             r.water_rate = float(rate)
             r.water_amount = round(r.water_units * float(rate), 2)
@@ -1383,6 +1383,31 @@ def save_apartment_photo(data: ApartmentPhotoInput, x_apartcare_token: str | Non
     charge_settings[data.apartment_id] = settings
     _save_state()
     return settings
+
+@app.delete("/settings/apartment-photo", response_model=ChargeSettings)
+def remove_apartment_photo(apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
+    actor=_require_role(x_apartcare_token,{"Admin"})
+    canonical=_actor_apartment_id(actor)
+    if apartment_id not in {"", "demo-apartment", canonical}:
+        raise HTTPException(status_code=403, detail="Tenant context mismatch.")
+    settings=charge_settings.get(canonical)
+    if not settings:
+        settings=ChargeSettings(apartment_id=canonical,tenant_id=canonical)
+    old_path=settings.apartment_photo_path
+    if old_path.startswith("/uploads/"):
+        try:
+            target=UPLOAD_DIR / Path(old_path).name
+            if target.exists(): target.unlink()
+        except Exception:
+            pass
+    if os.getenv('BLOB_READ_WRITE_TOKEN') and BlobClient is not None and settings.apartment_photo_name:
+        try:
+            client=BlobClient(); safe_name=Path(settings.apartment_photo_name).name
+            client.delete(f"apartcare/apartments/apartment_{canonical}{Path(safe_name).suffix.lower()}")
+        except Exception:
+            pass
+    settings.apartment_photo_name=""; settings.apartment_photo_path=""; settings.apartment_photo_data_url=""
+    charge_settings[canonical]=settings; _save_state(); return settings
 
 @app.get("/uploads/{filename}")
 async def serve_uploaded_file(filename: str):
@@ -2479,10 +2504,6 @@ def admin_login(data: AdminLoginInput, account_id: str = ""):
         if not user or user.locked or not user.active or tenant_passwords.get(user.id)!=_password_hash(data.password):
             raise HTTPException(status_code=401, detail="Invalid User ID or password.")
         user.tenant_id = tenant_account.tenant_id
-        # FIX 12: a normal account-created password is immediately usable.
-        # Only an explicit password reset (which updates updated_at) can force a change.
-        if user.force_password_change and user.created_at == user.updated_at:
-            user.force_password_change=False
         failed_key=f"{tenant_account.tenant_id}:{user.username.casefold()}"
         if tenant_passwords.get(user.id)!=_password_hash(data.password):
             failed_login_counts[failed_key]=failed_login_counts.get(failed_key,0)+1
@@ -2531,10 +2552,6 @@ def admin_login(data: AdminLoginInput, account_id: str = ""):
             raise HTTPException(status_code=403, detail="Account locked after repeated failed login attempts. Contact an Administrator.")
         raise HTTPException(status_code=401, detail="Invalid User ID or password")
     failed_login_counts.pop(user.username.lower(), None)
-    # FIX 12: legacy users created before the policy fix must not be forced to
-    # change their original password merely because the record was persisted.
-    if user.force_password_change and user.created_at == user.updated_at:
-        user.force_password_change=False
     token = secrets.token_urlsafe(32); auth_sessions[token] = user.id
     _audit(user.username, "Success", "Login", user_id=user.id)
     _save_state()
@@ -2681,7 +2698,7 @@ def create_admin_user(data: AdminUserInput, background_tasks: BackgroundTasks, x
     if mobile and len([c for c in mobile if c.isdigit()]) < 7:
         raise HTTPException(status_code=422, detail="Enter a valid Mobile Number.")
     now = datetime.now().isoformat(timespec="seconds")
-    user = AdminUser(id=str(uuid4()), username=data.username.strip(), full_name=data.full_name.strip(), email=email, mobile_no=mobile, role=data.role, created_at=now, updated_at=now, force_password_change=False, tenant_id=tenant_id)
+    user = AdminUser(id=str(uuid4()), username=data.username.strip(), full_name=data.full_name.strip(), email=email, mobile_no=mobile, role=data.role, created_at=now, updated_at=now, force_password_change=True, tenant_id=tenant_id)
     admin_users.append(user); admin_passwords[user.id] = _password_hash(data.password)
     if tenant_id:
         tenant_users.setdefault(tenant_id, []).append(user)
