@@ -325,6 +325,9 @@ class PaymentInput(TenantScopedModel):
     payment_date: str = Field(default_factory=lambda: date.today().isoformat())
     remarks: str = ""
 
+class PaymentBulkInput(TenantScopedModel):
+    payments: list[PaymentInput] = Field(min_length=1, max_length=500)
+
 class PaymentMonthLockInput(TenantScopedModel):
     month_key: str = Field(pattern=r"^\d{4}-\d{2}$")
     justification: str = Field(min_length=3, max_length=500)
@@ -1005,7 +1008,7 @@ def list_payments(month_key: str, apartment_id: str = "demo-apartment", x_apartc
     return sorted(result, key=lambda p: p.flat_no.lower())
 
 @app.post("/payments", response_model=Payment)
-def record_payment(data: PaymentInput, x_apartcare_token: str | None = Header(default=None)):
+def record_payment(data: PaymentInput, background_tasks: BackgroundTasks, x_apartcare_token: str | None = Header(default=None)):
     actor = _require_operational_write_role(x_apartcare_token)
     data.apartment_id = _actor_apartment_id(actor)
     data.tenant_id = data.apartment_id
@@ -1052,10 +1055,11 @@ def record_payment(data: PaymentInput, x_apartcare_token: str | None = Header(de
                 and p.month_key == data.month_key)
     ]
     payments.append(payment)
+    background_tasks.add_task(_save_state)
     return payment
 
 @app.put("/payments", response_model=Payment)
-def save_or_correct_payment(data: PaymentInput, x_apartcare_token: str | None = Header(default=None)):
+def save_or_correct_payment(data: PaymentInput, background_tasks: BackgroundTasks, x_apartcare_token: str | None = Header(default=None)):
     actor = _require_operational_write_role(x_apartcare_token)
     data.apartment_id = _actor_apartment_id(actor)
     data.tenant_id = data.apartment_id
@@ -1112,7 +1116,46 @@ def save_or_correct_payment(data: PaymentInput, x_apartcare_token: str | None = 
     # Keep a zero-value record too, so a deliberate Pending/₹0 save preserves
     # the user's current status and metadata.
     payments.append(payment)
+    background_tasks.add_task(_save_state)
     return payment
+
+@app.put("/payments/bulk")
+def save_or_correct_payments_bulk(data: PaymentBulkInput, background_tasks: BackgroundTasks, x_apartcare_token: str | None = Header(default=None)):
+    """Save multiple flat payments in one request and one persistence operation."""
+    actor = _require_operational_write_role(x_apartcare_token)
+    apartment_id = _actor_apartment_id(actor)
+    normalized = []
+    seen = set()
+    for item in data.payments:
+        if item.apartment_id and item.apartment_id != apartment_id:
+            raise HTTPException(status_code=403, detail="Payment target apartment does not match the logged-in account.")
+        ensure_payment_month_editable(apartment_id, item.month_key)
+        key=(item.month_key, item.flat_no.strip().casefold())
+        if key in seen:
+            raise HTTPException(status_code=400, detail=f"Duplicate payment row for Flat {item.flat_no} / {item.month_key}.")
+        seen.add(key)
+        rows = month_rows_for_flat(apartment_id, item.flat_no, item.month_key)
+        if not rows:
+            raise HTTPException(status_code=400, detail=f"Generate monthly maintenance for Flat {item.flat_no} and month {item.month_key} before saving payment.")
+        row=rows[0]
+        previous=previous_pending_balance(apartment_id, row.flat_no, item.month_key)
+        total_due=round(previous + row.rounded_total, 2)
+        if item.paid_amount > total_due + 0.0001:
+            raise HTTPException(status_code=400, detail=f"Paid amount cannot exceed Amount Due of {total_due} for Flat {item.flat_no}.")
+        normalized.append(Payment(
+            id=str(uuid4()), apartment_id=apartment_id, month_key=item.month_key, flat_no=row.flat_no,
+            owner_name=row.owner_name, resident_name=row.resident_name, previous_balance=previous,
+            current_month_total=row.rounded_total, amount_due=total_due,
+            paid_amount=round(item.paid_amount,2), pending_balance=max(0.0,round(total_due-item.paid_amount,2)),
+            payment_mode=item.payment_mode, reference=item.reference, payment_date=item.payment_date, remarks=item.remarks
+        ))
+    global payments
+    keys={(p.month_key,p.flat_no.strip().casefold()) for p in normalized}
+    payments=[p for p in payments if not (p.apartment_id==apartment_id and (p.month_key,p.flat_no.strip().casefold()) in keys)]
+    payments.extend(normalized)
+    background_tasks.add_task(_save_state)
+    summary_months=sorted({p.month_key for p in normalized})
+    return {"saved":len(normalized),"months":summary_months,"payments":normalized}
 
 @app.get("/payments/summary")
 def payments_summary(month_key: str, apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
@@ -2391,6 +2434,49 @@ Helping you run your building beautifully.
         return True, "Password reset email sent."
     except Exception as exc:
         return False, f"Unable to send reset email: {exc}"
+
+def _send_test_email(receiver: str, full_name: str, account_id: str) -> tuple[bool,str]:
+    sender=os.getenv("APARTCARE_SMTP_SENDER", "apartcarelite@gmail.com")
+    smtp_host=os.getenv("APARTCARE_SMTP_HOST", "smtp.gmail.com")
+    smtp_port=int(os.getenv("APARTCARE_SMTP_PORT", "587"))
+    app_password=os.getenv("APARTCARE_SMTP_APP_PASSWORD", "")
+    if not app_password:
+        return False, "Email is not configured. Set APARTCARE_SMTP_APP_PASSWORD to enable mail delivery."
+    msg=EmailMessage()
+    msg["Subject"]="ApartCare Lite — Email Test"
+    msg["From"]=f"ApartCare Lite <{sender}>"
+    msg["To"]=receiver
+    msg.set_content(f"""Hello {full_name},
+
+This is a test email from ApartCare Lite.
+
+Account Number: {account_id}
+Registered Email: {receiver}
+
+If you received this message, the ApartCare Lite mail configuration is working correctly.
+
+Warm regards,
+ApartCare Lite Team
+Your daily partner in property care.
+Helping you run your building beautifully.
+""")
+    try:
+        with smtplib.SMTP(smtp_host,smtp_port,timeout=15) as server:
+            server.starttls(); server.login(sender,app_password); server.send_message(msg)
+        return True, "Test email sent successfully."
+    except Exception as exc:
+        return False, f"Test email delivery failed: {exc}"
+
+@app.post("/admin/email/test")
+def test_email(background_tasks: BackgroundTasks, x_apartcare_token: str | None = Header(default=None)):
+    actor=_require_role(x_apartcare_token,{"Admin"})
+    receiver=(actor.email or "").strip().lower()
+    if not receiver:
+        raise HTTPException(status_code=422, detail="The logged-in Administrator does not have a registered email address.")
+    account=tenant_accounts.get(getattr(actor,"tenant_id","") or "")
+    account_id=account.account_id if account else getattr(charge_settings.get("demo-apartment",ChargeSettings()),"account_id","")
+    background_tasks.add_task(_send_test_email,receiver,actor.full_name,account_id)
+    return {"queued":True,"receiver":receiver,"message":f"Test email queued for {receiver}. Check the mailbox and spam folder."}
 
 def _current_actor(token: str | None) -> AdminUser:
     # Platform Owner audit/support sessions are intentionally read-only and
