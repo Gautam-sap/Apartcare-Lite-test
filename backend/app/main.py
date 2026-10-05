@@ -422,12 +422,12 @@ class AdminUserInput(BaseModel):
     full_name: str = Field(min_length=1, max_length=100)
     email: str = Field(default="", max_length=120)
     mobile_no: str = Field(default="", max_length=20)
-    role: Literal["Super Admin", "Admin", "Viewer", "Supervisor"] = "Viewer"
+    role: Literal["Super Admin", "Admin", "Viewer", "Supervisor", "Caretaker"] = "Viewer"
     password: str = Field(min_length=8, max_length=128)
 
 class AdminUserUpdate(BaseModel):
     full_name: str | None = Field(default=None, min_length=1, max_length=100)
-    role: Literal["Super Admin", "Admin", "Viewer", "Supervisor"] | None = None
+    role: Literal["Super Admin", "Admin", "Viewer", "Supervisor", "Caretaker"] | None = None
     active: bool | None = None
     locked: bool | None = None
     reason: str | None = None
@@ -457,7 +457,7 @@ class AdminUser(BaseModel):
     full_name: str
     email: str = ""
     mobile_no: str = ""
-    role: Literal["Super Admin", "Admin", "Viewer", "Supervisor"]
+    role: Literal["Super Admin", "Admin", "Viewer", "Supervisor", "Caretaker"]
     active: bool = True
     locked: bool = False
     force_password_change: bool = False
@@ -483,6 +483,7 @@ class SessionTimeoutSettings(BaseModel):
     super_admin: SessionTimeoutRule = Field(default_factory=lambda: SessionTimeoutRule(minutes=30))
     admin: SessionTimeoutRule = Field(default_factory=lambda: SessionTimeoutRule(minutes=20))
     viewer: SessionTimeoutRule = Field(default_factory=lambda: SessionTimeoutRule(minutes=15))
+    caretaker: SessionTimeoutRule = Field(default_factory=lambda: SessionTimeoutRule(minutes=15))
 
 # Apartment-level operational defaults. These are the FastAPI equivalent of
 # ApartCare's Operational Settings and are used when generating a new month.
@@ -576,7 +577,7 @@ def recalculate_month(apartment_id: str, month_key: str) -> None:
     if mode == "No Meter":
         configured_flats = int(charge_settings.get(apartment_id, ChargeSettings(apartment_id=apartment_id)).no_of_flats or 0)
         divisor = configured_flats if configured_flats > 0 else len(rows)
-        rate = ceil(total_cost / divisor) if divisor > 0 else 0.0
+        rate = float(ceil(total_cost / divisor)) if divisor > 0 else 0.0
         total_units = 0.0
         for r in rows:
             r.water_units = 0.0
@@ -586,7 +587,7 @@ def recalculate_month(apartment_id: str, month_key: str) -> None:
         for r in rows:
             r.water_units = max(0.0, round(float(r.current_reading) - float(r.previous_reading), 2))
         total_units = round(sum(r.water_units for r in rows), 2)
-        rate = ceil(total_cost / total_units) if total_units > 0 else 0.0
+        rate = float(ceil(total_cost / total_units)) if total_units > 0 else 0.0
         for r in rows:
             r.water_rate = float(rate)
             r.water_amount = round(r.water_units * float(rate), 2)
@@ -1005,7 +1006,7 @@ def list_payments(month_key: str, apartment_id: str = "demo-apartment", x_apartc
 
 @app.post("/payments", response_model=Payment)
 def record_payment(data: PaymentInput, x_apartcare_token: str | None = Header(default=None)):
-    actor = _require_write_role(x_apartcare_token)
+    actor = _require_operational_write_role(x_apartcare_token)
     data.apartment_id = _actor_apartment_id(actor)
     data.tenant_id = data.apartment_id
     ensure_payment_month_editable(data.apartment_id, data.month_key)
@@ -1055,7 +1056,7 @@ def record_payment(data: PaymentInput, x_apartcare_token: str | None = Header(de
 
 @app.put("/payments", response_model=Payment)
 def save_or_correct_payment(data: PaymentInput, x_apartcare_token: str | None = Header(default=None)):
-    actor = _require_write_role(x_apartcare_token)
+    actor = _require_operational_write_role(x_apartcare_token)
     data.apartment_id = _actor_apartment_id(actor)
     data.tenant_id = data.apartment_id
     ensure_payment_month_editable(data.apartment_id, data.month_key)
@@ -1205,7 +1206,7 @@ def expenses_summary(month_key: str, apartment_id: str = "demo-apartment", x_apa
 
 @app.post("/expenses", response_model=Expense, status_code=201)
 def create_expense(data: ExpenseInput, x_apartcare_token: str | None = Header(default=None)):
-    actor = _require_write_role(x_apartcare_token)
+    actor = _require_operational_write_role(x_apartcare_token)
     data.apartment_id = _actor_apartment_id(actor)
     data.tenant_id = data.apartment_id
     # A Payment month lock is the global financial freeze.
@@ -1226,7 +1227,7 @@ def create_expense(data: ExpenseInput, x_apartcare_token: str | None = Header(de
 
 @app.put("/expenses/{expense_id}", response_model=Expense)
 def update_expense(expense_id: str, data: ExpenseInput, x_apartcare_token: str | None = Header(default=None)):
-    actor = _require_write_role(x_apartcare_token)
+    actor = _require_operational_write_role(x_apartcare_token)
     tenant_id = _actor_apartment_id(actor)
     for index, expense in enumerate(expenses):
         if expense.id == expense_id and expense.apartment_id == tenant_id and not expense.deleted:
@@ -1248,7 +1249,7 @@ def update_expense(expense_id: str, data: ExpenseInput, x_apartcare_token: str |
 
 @app.delete("/expenses/{expense_id}")
 def delete_expense(expense_id: str, reason: str = "", x_apartcare_token: str | None = Header(default=None)):
-    actor = _require_role(x_apartcare_token, {"Admin"})
+    actor = _require_role(x_apartcare_token, {"Admin", "Caretaker"})
     tenant_id = _actor_apartment_id(actor)
     reason = " ".join(str(reason or "").strip().split())
     if len(reason) < 5:
@@ -1302,7 +1303,7 @@ def expense_history(month_key: str | None = None, apartment_id: str = "demo-apar
 # Legacy endpoint retained for compatibility; monthly expense creation is automatic.
 @app.post("/expenses/generate-watchman", response_model=Expense | None)
 def generate_watchman_expense(month_key: str, apartment_id: str = "demo-apartment", x_apartcare_token: str | None = Header(default=None)):
-    _require_write_role(x_apartcare_token)
+    _require_operational_write_role(x_apartcare_token)
     return ensure_watchman_expense(apartment_id, month_key)
 
 @app.get("/expenses/lock-history")
@@ -2045,7 +2046,7 @@ async def import_monthly_maintenance_excel(file: UploadFile = File(...), apartme
             residents.append(r)
             flat_history.append(FlatHistory(id=str(uuid4()),apartment_id=apartment_id,flat_no=flat,owner_name=flat,resident_name=resident_name,resident_type=typ,mobile_no=mobile,email=email,status='Active',remarks=r.remarks,effective_from=f'{mk}-01',version=1,change_reason='Historical maintenance import'))
             rv=1
-        maintenance_rows.append(MaintenanceRow(id=str(uuid4()),apartment_id=apartment_id,month_key=mk,flat_no=flat,owner_name=existing_res.owner_name if existing_res else flat,resident_name=resident_name,resident_type=typ,maintenance=maint,cca=cca,diesel=diesel,other_charges=other,previous_reading=prev,current_reading=curr,water_units=units,water_rate=round(water/units,4) if units else 0,water_amount=water,total=total,rounded_total=round(total),remarks=_clean_cell(val(row,'Remarks')),resident_version=rv))
+        maintenance_rows.append(MaintenanceRow(id=str(uuid4()),apartment_id=apartment_id,month_key=mk,flat_no=flat,owner_name=existing_res.owner_name if existing_res else flat,resident_name=resident_name,resident_type=typ,maintenance=maint,cca=cca,diesel=diesel,other_charges=other,previous_reading=prev,current_reading=curr,water_units=units,water_rate=float(ceil(water/units)) if units else 0,water_amount=water,total=total,rounded_total=round(total),remarks=_clean_cell(val(row,'Remarks')),resident_version=rv))
         if historical and paid>0:
             payments[:]=[p for p in payments if not (p.apartment_id==apartment_id and p.flat_no==flat and p.month_key==mk)]
             previous=previous_pending_balance(apartment_id,flat,mk); due=round(previous+total,2)
@@ -2055,7 +2056,7 @@ async def import_monthly_maintenance_excel(file: UploadFile = File(...), apartme
         imported_months.add(mk); added+=1
     for mk in imported_months:
         rows=get_month_rows(apartment_id,mk); total_units=round(sum(r.water_units for r in rows),2); total_water=round(sum(r.water_amount for r in rows),2)
-        water_headers[(apartment_id,mk)]=MonthWaterHeader(apartment_id=apartment_id,month_key=mk,water_mode='Meter',include_maintenance=True,include_cca=True,include_diesel=True,include_municipal_water=True,tanker_count=0,tanker_price=0,tanker_amount=0,municipal_bill=total_water,total_water_cost=total_water,water_rate=round(total_water/total_units,4) if total_units else 0,flats_count=len(rows),total_units=total_units)
+        water_headers[(apartment_id,mk)]=MonthWaterHeader(apartment_id=apartment_id,month_key=mk,water_mode='Meter',include_maintenance=True,include_cca=True,include_diesel=True,include_municipal_water=True,tanker_count=0,tanker_price=0,tanker_amount=0,municipal_bill=total_water,total_water_cost=total_water,water_rate=float(ceil(total_water/total_units)) if total_units else 0,flats_count=len(rows),total_units=total_units)
     if imported_months:
         _save_state()
     return {'added':added,'skipped':skipped,'invalid':invalid,'payments_created':payments_created,'historical':historical,'months':sorted(imported_months),'errors':errors[:20]}
@@ -2075,7 +2076,7 @@ def get_water_header(month_key: str, apartment_id: str = "demo-apartment", x_apa
 
 @app.post("/maintenance/generate", response_model=list[MaintenanceRow])
 def generate_maintenance(data: MaintenanceGenerateInput, x_apartcare_token: str | None = Header(default=None)):
-    actor = _require_write_role(x_apartcare_token)
+    actor = _require_operational_write_role(x_apartcare_token)
     data.apartment_id = _actor_apartment_id(actor)
     data.tenant_id = data.apartment_id
     if not month_key_valid(data.month_key):
@@ -2143,7 +2144,7 @@ def generate_maintenance(data: MaintenanceGenerateInput, x_apartcare_token: str 
 
 @app.put("/maintenance/{maintenance_id}", response_model=MaintenanceRow)
 def update_maintenance(maintenance_id: str, data: MaintenanceUpdate, x_apartcare_token: str | None = Header(default=None)):
-    actor = _require_write_role(x_apartcare_token)
+    actor = _require_operational_write_role(x_apartcare_token)
     tenant_id = _actor_apartment_id(actor)
     for row in maintenance_rows:
         if row.id == maintenance_id and row.apartment_id == tenant_id:
@@ -2161,7 +2162,7 @@ def update_maintenance(maintenance_id: str, data: MaintenanceUpdate, x_apartcare
 
 @app.put("/maintenance/water-header/{month_key}", response_model=MonthWaterHeader)
 def update_water_header(month_key: str, data: MaintenanceGenerateInput, x_apartcare_token: str | None = Header(default=None)):
-    actor = _require_write_role(x_apartcare_token)
+    actor = _require_operational_write_role(x_apartcare_token)
     data.apartment_id = _actor_apartment_id(actor)
     data.tenant_id = data.apartment_id
     ensure_global_month_editable(data.apartment_id, month_key)
@@ -2249,7 +2250,7 @@ def _account_id_for_local(country="India",state="Telangana"):
     return _account_id_for(country,state)
 
 def _send_welcome_email(account_id: str, apartment_name: str, admin_name: str, admin_username: str, receiver: str):
-    sender=os.getenv("APARTCARE_SMTP_SENDER", os.getenv("APARTCARE_SMTP_EMAIL", "apartcarelite@gmail.com"))
+    sender=os.getenv("APARTCARE_SMTP_SENDER", "apartcarelite@gmail.com")
     app_password=os.getenv("APARTCARE_SMTP_APP_PASSWORD", "")
     subject="Welcome to ApartCare Lite – Your Property Account Is Ready!"
     body=f"""Dear {admin_name},
@@ -2288,7 +2289,7 @@ ApartCare Lite Team
         return False, f"Email delivery failed: {str(exc)}"
 
 def _send_property_user_welcome_email(account_id: str, apartment_name: str, full_name: str, username: str, role: str, receiver: str) -> tuple[bool,str]:
-    sender=os.getenv("APARTCARE_SMTP_SENDER", os.getenv("APARTCARE_SMTP_EMAIL", "apartcarelite@gmail.com"))
+    sender=os.getenv("APARTCARE_SMTP_SENDER", "apartcarelite@gmail.com")
     smtp_host=os.getenv("APARTCARE_SMTP_HOST", "smtp.gmail.com")
     smtp_port=int(os.getenv("APARTCARE_SMTP_PORT", "587"))
     app_password=os.getenv("APARTCARE_SMTP_APP_PASSWORD", "")
@@ -2325,7 +2326,7 @@ ApartCare Lite Team
         return False, f"User email delivery failed: {exc}"
 
 def _send_platform_welcome_email(receiver: str, full_name: str, username: str) -> tuple[bool,str]:
-    sender=os.getenv("APARTCARE_SMTP_SENDER", os.getenv("APARTCARE_SMTP_EMAIL", "apartcarelite@gmail.com"))
+    sender=os.getenv("APARTCARE_SMTP_SENDER", "apartcarelite@gmail.com")
     smtp_host=os.getenv("APARTCARE_SMTP_HOST", "smtp.gmail.com")
     smtp_port=int(os.getenv("APARTCARE_SMTP_PORT", "587"))
     app_password=os.getenv("APARTCARE_SMTP_APP_PASSWORD", "")
@@ -2441,8 +2442,19 @@ def _resolved_actor_tenant(token: str | None, requested_apartment_id: str = "dem
     return str(requested_apartment_id or "demo-apartment")
 
 
+def _require_operational_write_role(token: str | None) -> AdminUser:
+    """Allow Admin and Caretaker to operate Monthly Maintenance, Payments and Expenses.
+    Caretaker never gains access to lock/unlock endpoints; those remain Admin-only.
+    """
+    if _is_platform_support_token(token):
+        raise HTTPException(status_code=403, detail="Platform Owner Audit/Support access is read-only.")
+    user = _current_actor(token)
+    if user.role not in {"Admin", "Caretaker"}:
+        raise HTTPException(status_code=403, detail="This action requires an Administrator or Caretaker role.")
+    return user
+
 def _require_write_role(token: str | None) -> AdminUser:
-    """Property Viewer is strictly read-only; Platform Owner audit/support is also read-only."""
+    """Property Viewer is strictly read-only; Caretaker has operational write access only; Platform Owner audit/support is also read-only."""
     if _is_platform_support_token(token):
         raise HTTPException(status_code=403, detail="Platform Owner Audit/Support access is read-only.")
     user = _current_actor(token)
@@ -2523,7 +2535,8 @@ def create_apartment_account(data: ApartmentAccountCreateInput, background_tasks
         apartment_id=tid, account_id=account_id, account_mobile=mobile,
         apartment_name=account.apartment_name, address=account.address,
         city=account.city, pin_code=account.pin_code, state=account.state,
-        country=account.country, language=account.language
+        country=account.country, language=account.language,
+        common_maintenance=0, cca=0, watchman_salary=0
     )
     # Seed utility categories for the new apartment only.
     for category_name in DEFAULT_UTILITY_CATEGORIES:
@@ -2540,7 +2553,7 @@ def create_apartment_account(data: ApartmentAccountCreateInput, background_tasks
 
 
 @app.post("/admin/auth/login", response_model=AuthLoginResponse)
-def admin_login(data: AdminLoginInput, account_id: str = ""):
+def admin_login(data: AdminLoginInput, account_id: str = "", background_tasks: BackgroundTasks | None = None):
     supplied_account=account_id.strip()
     # New multi-apartment accounts are authenticated by their own tenant record.
     tenant_account=next((a for a in tenant_accounts.values() if a.account_id.casefold()==supplied_account.casefold()),None) if supplied_account else None
@@ -2565,7 +2578,7 @@ def admin_login(data: AdminLoginInput, account_id: str = ""):
         failed_login_counts.pop(failed_key,None)
         token=secrets.token_urlsafe(32); auth_sessions[token]=user.id; tenant_sessions[token]=(tenant_account.tenant_id,user.id)
         _audit(user.username,"Success","Login",f"Tenant {tenant_account.account_id}",user.id,tenant_account.tenant_id)
-        _save_state()
+        if background_tasks: background_tasks.add_task(_save_state)
         return {"user":user,"token":token,"account":_account_payload(tenant_account)}
     settings=charge_settings.get("demo-apartment", ChargeSettings())
     expected=getattr(settings,"account_id", "")
@@ -2602,7 +2615,7 @@ def admin_login(data: AdminLoginInput, account_id: str = ""):
     failed_login_counts.pop(user.username.lower(), None)
     token = secrets.token_urlsafe(32); auth_sessions[token] = user.id
     _audit(user.username, "Success", "Login", user_id=user.id)
-    _save_state()
+    if background_tasks: background_tasks.add_task(_save_state)
     return AuthLoginResponse(user=user, token=token, account={"tenant_id":"demo-apartment","account_id":getattr(settings,"account_id",""),"apartment_name":settings.apartment_name})
 
 @app.post("/admin/auth/request-password-reset")
@@ -2695,7 +2708,7 @@ def change_own_password(data: ChangePasswordInput, x_apartcare_token: str | None
     return user
 
 @app.post("/admin/auth/logout")
-def admin_logout(x_apartcare_token: str | None = Header(default=None)):
+def admin_logout(x_apartcare_token: str | None = Header(default=None), background_tasks: BackgroundTasks | None = None):
     if x_apartcare_token:
         user_id=auth_sessions.get(x_apartcare_token)
         user=next((u for u in admin_users if u.id==user_id),None)
@@ -2707,7 +2720,7 @@ def admin_logout(x_apartcare_token: str | None = Header(default=None)):
             _audit(user.username,"Success","Logout","Property session ended",user.id,getattr(user,"tenant_id",None))
         auth_sessions.pop(x_apartcare_token, None)
         tenant_sessions.pop(x_apartcare_token, None)
-        _save_state()
+        if background_tasks: background_tasks.add_task(_save_state)
     return {"logged_out": True}
 
 @app.get("/admin/users", response_model=list[AdminUser])
@@ -2737,8 +2750,8 @@ def create_admin_user(data: AdminUserInput, background_tasks: BackgroundTasks, x
     if any(u.username.lower() == data.username.lower() for u in scoped_users):
         _audit(actor.username, "Failed", "User Create", f"Duplicate User ID attempted: {data.username.strip()}", actor.id, tenant_id)
         raise HTTPException(status_code=409, detail="User ID already exists. Duplicate User IDs are not allowed.")
-    if data.role not in {"Viewer", "Supervisor"}:
-        raise HTTPException(status_code=403, detail="Apartment Admin can create Viewer or Supervisor accounts. Super Admin is a platform-only role.")
+    if data.role not in {"Viewer", "Supervisor", "Caretaker"}:
+        raise HTTPException(status_code=403, detail="Apartment Admin can create Viewer, Caretaker or Supervisor accounts. Super Admin is a platform-only role.")
     email=data.email.strip().lower()
     mobile="".join(ch for ch in data.mobile_no.strip() if ch.isdigit() or ch=="+")
     if email and ("@" not in email or "." not in email.rsplit("@",1)[-1]):
@@ -2767,10 +2780,10 @@ def update_admin_user(user_id: str, data: AdminUserUpdate, x_apartcare_token: st
     if not target: raise HTTPException(status_code=404, detail="User not found")
     if actor.id == target.id and (data.active is False or data.locked is True):
         raise HTTPException(status_code=400, detail="You cannot deactivate or lock your own active session.")
-    if target.role not in {"Viewer", "Supervisor"}:
-        raise HTTPException(status_code=403, detail="Admin can manage Viewer or Supervisor accounts only.")
+    if target.role not in {"Viewer", "Supervisor", "Caretaker"}:
+        raise HTTPException(status_code=403, detail="Admin can manage Viewer, Caretaker or Supervisor accounts only.")
     if data.role is not None:
-        if data.role not in {"Viewer", "Supervisor"}:
+        if data.role not in {"Viewer", "Supervisor", "Caretaker"}:
             raise HTTPException(status_code=403, detail="Apartment users cannot be assigned Admin or Super Admin through Administration.")
         target.role = data.role
     if data.full_name is not None: target.full_name = data.full_name.strip()
@@ -2792,8 +2805,8 @@ def reset_admin_password(user_id: str, data: PasswordResetInput, x_apartcare_tok
     tenant_id=getattr(actor,"tenant_id","")
     target = next((u for u in admin_users if u.id == user_id and getattr(u,"tenant_id","")==tenant_id), None)
     if not target: raise HTTPException(status_code=404, detail="User not found")
-    if target.role not in {"Viewer", "Supervisor"}:
-        raise HTTPException(status_code=403, detail="Admin can reset Viewer or Supervisor passwords only.")
+    if target.role not in {"Viewer", "Supervisor", "Caretaker"}:
+        raise HTTPException(status_code=403, detail="Admin can reset Viewer, Caretaker or Supervisor passwords only.")
     # Universal password policy: any Administrator-initiated reset creates a
     # temporary password. The target MUST change it at the next login,
     # regardless of the caller-supplied force_change flag.
@@ -3508,10 +3521,6 @@ def platform_bootstrap(data: PlatformBootstrapInput, background_tasks: Backgroun
 def platform_login(data: AdminLoginInput):
     if platform_owner is None or data.username.lower()!=platform_owner.username.lower() or _password_hash(data.password)!=platform_owner_password:
         raise HTTPException(status_code=401, detail="Invalid Product Owner credentials.")
-    # FIX 12: normal Platform Owner creation never requires a password change.
-    # Preserve the forced flag only when it came from an explicit reset.
-    if platform_owner.force_password_change and platform_owner.created_at == platform_owner.updated_at:
-        platform_owner.force_password_change=False
     token=secrets.token_urlsafe(32); platform_sessions[token]=platform_owner.id
     platform_audit.append({"at":datetime.now().isoformat(timespec='seconds'),"event":"Product Owner Login","actor":platform_owner.username,"detail":"Success"})
     _save_state()
@@ -4108,35 +4117,42 @@ def _load_state():
         opening_balances={k:OpeningBalance(**v) for k,v in d.get('opening_balances',{}).items()}; opening_balance_history=[OpeningBalanceHistory(**x) for x in d.get('opening_balance_history',[])]
         residents=[Resident(**x) for x in d.get('residents',[])]; flat_history=[FlatHistory(**x) for x in d.get('flat_history',[])]
         maintenance_rows=[MaintenanceRow(**x) for x in d.get('maintenance_rows',[])]; water_headers={tuple(k.split('|||',1)):MonthWaterHeader(**v) for k,v in d.get('water_headers',{}).items()}
+        # V6.5.14: migrate existing water rates to nearest whole rupee and recalculate row water amounts.
+        for (_tid, _mk), _header in list(water_headers.items()):
+            _rows=[r for r in maintenance_rows if r.apartment_id==_tid and r.month_key==_mk]
+            if _rows and _header.total_units>0:
+                _rate=float(ceil(float(_header.total_water_cost)/float(_header.total_units)))
+                _header.water_rate=_rate
+                for _r in _rows:
+                    _r.water_rate=_rate
+                    _r.water_amount=round(float(_r.water_units)*_rate,2)
+                    _r.total=round(float(_r.maintenance if _header.include_maintenance else 0)+float(_r.cca if _header.include_cca else 0)+float(_r.diesel if _header.include_diesel else 0)+float(_r.other_charges)+float(_r.water_amount),2)
+                    _r.rounded_total=round(_r.total)
         po=d.get('platform_owner'); platform_owner=AdminUser(**po) if po else None; platform_owner_password=d.get('platform_owner_password','')
         policy_present='platform_password_policy_initialized' in d
         platform_password_policy_initialized=bool(d.get('platform_password_policy_initialized',False))
-        # FIX 11: normal account creation/login does not force a password change.
-        # Clear only the Fix-10 initial-password flag (created_at == updated_at).
-        # Explicit password resets update updated_at and therefore remain forced.
-        if platform_owner and platform_owner.force_password_change and platform_owner.created_at == platform_owner.updated_at:
-            platform_owner.force_password_change=False
-            platform_password_policy_initialized=True
-        for _tid, _users in tenant_users.items():
-            for _u in _users:
-                if _u.force_password_change and _u.created_at == _u.updated_at:
-                    _u.force_password_change=False
         tenant_accounts={k:TenantAccount(**v) for k,v in d.get('tenant_accounts',{}).items()}
         # Backfill the new per-tenant operational start month without altering
         # historical transactional data or tenant identifiers.
         for _account in tenant_accounts.values():
             locked_month=_effective_operational_start_month(_account.tenant_id)
             _account.data_start_month=locked_month
+        # V6.5.14: clean-slate financial defaults for tenants that have never saved a charge version.
+        # This prevents a previous apartment's Common Maintenance / CCA values from appearing in a new account.
+        for _tid, _account in tenant_accounts.items():
+            _settings = charge_settings.get(_tid)
+            _history = [h for h in charge_history if h.apartment_id == _tid]
+            if _settings and not _history:
+                _settings.common_maintenance = 0
+                _settings.cca = 0
+                _settings.watchman_salary = 0
+                _settings.tenant_id = _tid
+                _settings.apartment_id = _tid
+
         tenant_account_validity_history=[TenantAccountValidityHistory(**x) for x in d.get('tenant_account_validity_history',[])]; tenant_users={k:[AdminUser(**u) for u in v] for k,v in d.get('tenant_users',{}).items()}; tenant_passwords=d.get('tenant_passwords',{}); platform_audit=d.get('platform_audit',[]); auth_sessions=dict(d.get('auth_sessions',{}))
         platform_sessions=dict(d.get('platform_sessions',{}))
         tenant_sessions={k:tuple(v) for k,v in d.get('tenant_sessions',{}).items()}
         platform_support_sessions={k:(v.get('tenant_id',''),AdminUser(**v.get('user',{}))) for k,v in d.get('platform_support_sessions',{}).items() if v.get('user')}
-        # FIX 12: clear only the legacy first-login flag on persisted users.
-        # Explicit password resets change updated_at and therefore remain forced.
-        for _users in tenant_users.values():
-            for _u in _users:
-                if _u.force_password_change and _u.created_at == _u.updated_at:
-                    _u.force_password_change=False
         subscription_settings=SubscriptionSettings(**d.get('subscription_settings',{}));
         # A legacy Fix-10 state may have trial_enabled=True with updated_by=system.
         # Treat that as the old implicit default, not an explicit Product Owner choice.
