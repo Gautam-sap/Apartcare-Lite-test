@@ -2553,7 +2553,7 @@ def create_apartment_account(data: ApartmentAccountCreateInput, background_tasks
 
 
 @app.post("/admin/auth/login", response_model=AuthLoginResponse)
-def admin_login(data: AdminLoginInput, account_id: str = "", background_tasks: BackgroundTasks | None = None):
+def admin_login(data: AdminLoginInput, background_tasks: BackgroundTasks, account_id: str = ""):
     supplied_account=account_id.strip()
     # New multi-apartment accounts are authenticated by their own tenant record.
     tenant_account=next((a for a in tenant_accounts.values() if a.account_id.casefold()==supplied_account.casefold()),None) if supplied_account else None
@@ -2578,7 +2578,7 @@ def admin_login(data: AdminLoginInput, account_id: str = "", background_tasks: B
         failed_login_counts.pop(failed_key,None)
         token=secrets.token_urlsafe(32); auth_sessions[token]=user.id; tenant_sessions[token]=(tenant_account.tenant_id,user.id)
         _audit(user.username,"Success","Login",f"Tenant {tenant_account.account_id}",user.id,tenant_account.tenant_id)
-        if background_tasks: background_tasks.add_task(_save_state)
+        background_tasks.add_task(_save_state)
         return {"user":user,"token":token,"account":_account_payload(tenant_account)}
     settings=charge_settings.get("demo-apartment", ChargeSettings())
     expected=getattr(settings,"account_id", "")
@@ -2615,7 +2615,7 @@ def admin_login(data: AdminLoginInput, account_id: str = "", background_tasks: B
     failed_login_counts.pop(user.username.lower(), None)
     token = secrets.token_urlsafe(32); auth_sessions[token] = user.id
     _audit(user.username, "Success", "Login", user_id=user.id)
-    if background_tasks: background_tasks.add_task(_save_state)
+    background_tasks.add_task(_save_state)
     return AuthLoginResponse(user=user, token=token, account={"tenant_id":"demo-apartment","account_id":getattr(settings,"account_id",""),"apartment_name":settings.apartment_name})
 
 @app.post("/admin/auth/request-password-reset")
@@ -2708,7 +2708,7 @@ def change_own_password(data: ChangePasswordInput, x_apartcare_token: str | None
     return user
 
 @app.post("/admin/auth/logout")
-def admin_logout(x_apartcare_token: str | None = Header(default=None), background_tasks: BackgroundTasks | None = None):
+def admin_logout(background_tasks: BackgroundTasks, x_apartcare_token: str | None = Header(default=None)):
     if x_apartcare_token:
         user_id=auth_sessions.get(x_apartcare_token)
         user=next((u for u in admin_users if u.id==user_id),None)
@@ -2720,7 +2720,7 @@ def admin_logout(x_apartcare_token: str | None = Header(default=None), backgroun
             _audit(user.username,"Success","Logout","Property session ended",user.id,getattr(user,"tenant_id",None))
         auth_sessions.pop(x_apartcare_token, None)
         tenant_sessions.pop(x_apartcare_token, None)
-        if background_tasks: background_tasks.add_task(_save_state)
+        background_tasks.add_task(_save_state)
     return {"logged_out": True}
 
 @app.get("/admin/users", response_model=list[AdminUser])
