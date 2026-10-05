@@ -2040,7 +2040,9 @@ async def import_residents_excel(file: UploadFile = File(...), apartment_id: str
         r=Resident(id=str(uuid4()), apartment_id=apartment_id, flat_no=flat, owner_name=owner, resident_name=resident, resident_type=typ, mobile_no=mobile, email=email, status=status, remarks=remarks)
         residents.append(r); added+=1
         flat_history.append(FlatHistory(id=str(uuid4()), apartment_id=apartment_id, flat_no=flat, owner_name=owner, resident_name=resident, resident_type=typ, mobile_no=mobile, email=email, status=status, remarks=remarks, change_reason='Excel import'))
-    return {'added':added,'updated':updated,'skipped':skipped,'invalid':invalid,'errors':errors[:20]}
+    if added or updated:
+        _save_state()
+    return {'added':added,'updated':updated,'skipped':skipped,'invalid':invalid,'errors':errors[:50]}
 
 @app.post('/import/monthly-maintenance')
 async def import_monthly_maintenance_excel(file: UploadFile = File(...), apartment_id: str = 'demo-apartment', historical: bool = Form(False), x_apartcare_token: str | None = Header(default=None)):
@@ -2292,9 +2294,17 @@ def _account_id_for_local(country="India",state="Telangana"):
     if existing and re.fullmatch(r"[A-Z]{2}-[A-Z]{2}-ACL-\d{8}-\d{6}",existing): return existing
     return _account_id_for(country,state)
 
+def _smtp_config():
+    smtp_user=os.getenv('APARTCARE_SMTP_EMAIL','').strip() or os.getenv('APARTCARE_SMTP_SENDER','apartcarelite@gmail.com').strip()
+    sender=os.getenv('APARTCARE_SMTP_SENDER','').strip() or smtp_user
+    smtp_host=os.getenv('APARTCARE_SMTP_HOST','smtp.gmail.com').strip()
+    try: smtp_port=int(os.getenv('APARTCARE_SMTP_PORT','587'))
+    except ValueError: smtp_port=587
+    app_password=os.getenv('APARTCARE_SMTP_APP_PASSWORD','').strip()
+    return smtp_user,sender,smtp_host,smtp_port,app_password
+
 def _send_welcome_email(account_id: str, apartment_name: str, admin_name: str, admin_username: str, receiver: str):
-    sender=os.getenv("APARTCARE_SMTP_SENDER", "apartcarelite@gmail.com")
-    app_password=os.getenv("APARTCARE_SMTP_APP_PASSWORD", "")
+    smtp_user,sender,smtp_host,smtp_port,app_password=_smtp_config()
     subject="Welcome to ApartCare Lite – Your Property Account Is Ready!"
     body=f"""Dear {admin_name},
 
@@ -2325,17 +2335,14 @@ ApartCare Lite Team
         return False, "Email not sent: configure APARTCARE_SMTP_APP_PASSWORD to enable Gmail delivery."
     try:
         msg=EmailMessage(); msg["Subject"]=subject; msg["From"]=f"ApartCare Lite <{sender}>"; msg["To"]=receiver; msg.set_content(body)
-        with smtplib.SMTP_SSL("smtp.gmail.com",465,timeout=20) as server:
-            server.login(sender,app_password); server.send_message(msg)
+        with smtplib.SMTP(smtp_host,smtp_port,timeout=15) as server:
+            server.starttls(); server.login(smtp_user,app_password); server.send_message(msg)
         return True, "Welcome email sent successfully."
     except Exception as exc:
         return False, f"Email delivery failed: {str(exc)}"
 
 def _send_property_user_welcome_email(account_id: str, apartment_name: str, full_name: str, username: str, role: str, receiver: str) -> tuple[bool,str]:
-    sender=os.getenv("APARTCARE_SMTP_SENDER", "apartcarelite@gmail.com")
-    smtp_host=os.getenv("APARTCARE_SMTP_HOST", "smtp.gmail.com")
-    smtp_port=int(os.getenv("APARTCARE_SMTP_PORT", "587"))
-    app_password=os.getenv("APARTCARE_SMTP_APP_PASSWORD", "")
+    smtp_user,sender,smtp_host,smtp_port,app_password=_smtp_config()
     if not app_password:
         return False, "Email not sent: configure APARTCARE_SMTP_APP_PASSWORD to enable delivery."
     msg=EmailMessage()
@@ -2363,16 +2370,13 @@ ApartCare Lite Team
 """)
     try:
         with smtplib.SMTP(smtp_host,smtp_port,timeout=15) as server:
-            server.starttls(); server.login(sender,app_password); server.send_message(msg)
+            server.starttls(); server.login(smtp_user,app_password); server.send_message(msg)
         return True, "User welcome email sent successfully."
     except Exception as exc:
         return False, f"User email delivery failed: {exc}"
 
 def _send_platform_welcome_email(receiver: str, full_name: str, username: str) -> tuple[bool,str]:
-    sender=os.getenv("APARTCARE_SMTP_SENDER", "apartcarelite@gmail.com")
-    smtp_host=os.getenv("APARTCARE_SMTP_HOST", "smtp.gmail.com")
-    smtp_port=int(os.getenv("APARTCARE_SMTP_PORT", "587"))
-    app_password=os.getenv("APARTCARE_SMTP_APP_PASSWORD", "")
+    smtp_user,sender,smtp_host,smtp_port,app_password=_smtp_config()
     if not app_password:
         return False, "Email is not configured. Set APARTCARE_SMTP_APP_PASSWORD to enable Platform Owner email delivery."
     msg=EmailMessage()
@@ -2396,16 +2400,13 @@ Helping you run your building beautifully.
 """)
     try:
         with smtplib.SMTP(smtp_host,smtp_port,timeout=15) as server:
-            server.starttls(); server.login(sender,app_password); server.send_message(msg)
+            server.starttls(); server.login(smtp_user,app_password); server.send_message(msg)
         return True, "Platform Owner welcome email sent successfully."
     except Exception as exc:
         return False, f"Platform Owner email delivery failed: {exc}"
 
 def _send_password_reset_email(receiver: str, full_name: str, account_id: str, reset_token: str) -> tuple[bool,str]:
-    sender=os.getenv("APARTCARE_SMTP_SENDER", "apartcarelite@gmail.com")
-    smtp_host=os.getenv("APARTCARE_SMTP_HOST", "smtp.gmail.com")
-    smtp_port=int(os.getenv("APARTCARE_SMTP_PORT", "587"))
-    app_password=os.getenv("APARTCARE_SMTP_APP_PASSWORD", "")
+    smtp_user,sender,smtp_host,smtp_port,app_password=_smtp_config()
     if not app_password:
         return False, "Email is not configured. Set APARTCARE_SMTP_APP_PASSWORD to send reset emails."
     msg=EmailMessage()
@@ -2430,16 +2431,13 @@ Helping you run your building beautifully.
 """)
     try:
         with smtplib.SMTP(smtp_host,smtp_port,timeout=15) as server:
-            server.starttls(); server.login(sender,app_password); server.send_message(msg)
+            server.starttls(); server.login(smtp_user,app_password); server.send_message(msg)
         return True, "Password reset email sent."
     except Exception as exc:
         return False, f"Unable to send reset email: {exc}"
 
 def _send_test_email(receiver: str, full_name: str, account_id: str) -> tuple[bool,str]:
-    sender=os.getenv("APARTCARE_SMTP_SENDER", "apartcarelite@gmail.com")
-    smtp_host=os.getenv("APARTCARE_SMTP_HOST", "smtp.gmail.com")
-    smtp_port=int(os.getenv("APARTCARE_SMTP_PORT", "587"))
-    app_password=os.getenv("APARTCARE_SMTP_APP_PASSWORD", "")
+    smtp_user,sender,smtp_host,smtp_port,app_password=_smtp_config()
     if not app_password:
         return False, "Email is not configured. Set APARTCARE_SMTP_APP_PASSWORD to enable mail delivery."
     msg=EmailMessage()
@@ -2462,21 +2460,23 @@ Helping you run your building beautifully.
 """)
     try:
         with smtplib.SMTP(smtp_host,smtp_port,timeout=15) as server:
-            server.starttls(); server.login(sender,app_password); server.send_message(msg)
+            server.starttls(); server.login(smtp_user,app_password); server.send_message(msg)
         return True, "Test email sent successfully."
     except Exception as exc:
         return False, f"Test email delivery failed: {exc}"
 
 @app.post("/admin/email/test")
-def test_email(background_tasks: BackgroundTasks, x_apartcare_token: str | None = Header(default=None)):
+def test_email(x_apartcare_token: str | None = Header(default=None)):
     actor=_require_role(x_apartcare_token,{"Admin"})
     receiver=(actor.email or "").strip().lower()
     if not receiver:
         raise HTTPException(status_code=422, detail="The logged-in Administrator does not have a registered email address.")
     account=tenant_accounts.get(getattr(actor,"tenant_id","") or "")
     account_id=account.account_id if account else getattr(charge_settings.get("demo-apartment",ChargeSettings()),"account_id","")
-    background_tasks.add_task(_send_test_email,receiver,actor.full_name,account_id)
-    return {"queued":True,"receiver":receiver,"message":f"Test email queued for {receiver}. Check the mailbox and spam folder."}
+    sent,msg=_send_test_email(receiver,actor.full_name,account_id)
+    if not sent:
+        raise HTTPException(status_code=502, detail=msg)
+    return {"sent":True,"receiver":receiver,"message":f"Test email sent successfully to {receiver}. Check Inbox and Spam/Junk."}
 
 def _current_actor(token: str | None) -> AdminUser:
     # Platform Owner audit/support sessions are intentionally read-only and
@@ -2642,14 +2642,30 @@ def create_apartment_account(data: ApartmentAccountCreateInput, background_tasks
 def admin_login(data: AdminLoginInput, background_tasks: BackgroundTasks, account_id: str = ""):
     supplied_account=account_id.strip()
     # New multi-apartment accounts are authenticated by their own tenant record.
-    tenant_account=next((a for a in tenant_accounts.values() if a.account_id.casefold()==supplied_account.casefold()),None) if supplied_account else None
+    # Account numbers must be unique, but older state files may contain duplicate
+    # numbers. Never pick the first match because that can silently open Account A
+    # while the user intended Account B. If duplicates exist, resolve by the
+    # supplied user/password; if still ambiguous, fail closed.
+    matching_accounts=[a for a in tenant_accounts.values() if a.account_id.casefold()==supplied_account.casefold()] if supplied_account else []
+    tenant_account=None; user=None
+    if matching_accounts:
+        supplied_username=data.username.strip().casefold()
+        valid_matches=[]
+        for candidate in matching_accounts:
+            candidate_user=next((u for u in tenant_users.get(candidate.tenant_id,[]) if u.username.casefold()==supplied_username or (u.email and u.email.casefold()==supplied_username)),None)
+            if candidate_user and not candidate_user.locked and candidate_user.active and tenant_passwords.get(candidate_user.id)==_password_hash(data.password):
+                valid_matches.append((candidate,candidate_user))
+        if len(valid_matches)==1:
+            tenant_account,user=valid_matches[0]
+        elif len(valid_matches)>1:
+            raise HTTPException(status_code=409, detail="This Account Number exists for more than one apartment with the same User ID and password. Please have the Platform Owner repair the duplicate Account Number before continuing.")
+        else:
+            # Preserve the normal invalid-credential response without revealing
+            # which tenant records exist.
+            raise HTTPException(status_code=401, detail="Invalid User ID or password.")
     if tenant_account:
         if tenant_account.status!="Active" or tenant_account.valid_from>date.today().isoformat() or tenant_account.valid_to<date.today().isoformat():
             raise HTTPException(status_code=403, detail="Property account is not currently active.")
-        supplied_username=data.username.strip().casefold()
-        user=next((u for u in tenant_users.get(tenant_account.tenant_id,[]) if u.username.casefold()==supplied_username or (u.email and u.email.casefold()==supplied_username)),None)
-        if not user or user.locked or not user.active or tenant_passwords.get(user.id)!=_password_hash(data.password):
-            raise HTTPException(status_code=401, detail="Invalid User ID or password.")
         user.tenant_id = tenant_account.tenant_id
         failed_key=f"{tenant_account.tenant_id}:{user.username.casefold()}"
         if tenant_passwords.get(user.id)!=_password_hash(data.password):
