@@ -414,6 +414,11 @@ class ApartmentAccountCreateInput(BaseModel):
     admin_email: str = Field(min_length=5, max_length=120)
     admin_mobile: str = Field(min_length=7, max_length=20)
     password: str = Field(min_length=8, max_length=128)
+    terms_accepted: bool = False
+    privacy_acknowledged: bool = False
+    terms_version: str = "1.0"
+    privacy_notice_version: str = "1.0"
+    legal_accepted_at: str = ""
 
 class AuthLoginResponse(BaseModel):
     user: "AdminUser"
@@ -429,7 +434,7 @@ class AdminUserInput(BaseModel):
     password: str = Field(min_length=8, max_length=128)
 
 class UserLanguagePreferenceUpdate(BaseModel):
-    language: Literal["English", "Telugu", "Hindi", "Tamil", "Kannada"] = "English"
+    language: Literal["English", "Hindi", "Telugu", "Tamil", "Kannada", "Malayalam", "Marathi", "Gujarati", "Bengali", "Punjabi", "Odia", "Urdu"] = "English"
 
 class AdminUserUpdate(BaseModel):
     full_name: str | None = Field(default=None, min_length=1, max_length=100)
@@ -2579,6 +2584,8 @@ def create_apartment_account(data: ApartmentAccountCreateInput, background_tasks
     Owner session is required.
     """
     global tenant_accounts, tenant_users, tenant_passwords, admin_users, admin_passwords
+    if not data.terms_accepted or not data.privacy_acknowledged:
+        raise HTTPException(status_code=422, detail="Terms of Service and Privacy Notice acknowledgement are required to create an Apartment Account.")
     email=data.admin_email.strip().lower()
     mobile=''.join(ch for ch in data.admin_mobile.strip() if ch.isdigit() or ch=='+')
     if '@' not in email or '.' not in email.rsplit('@',1)[-1]:
@@ -2603,12 +2610,14 @@ def create_apartment_account(data: ApartmentAccountCreateInput, background_tasks
         data_start_month="",
         valid_from=date.today().isoformat(),
         valid_to=(date.today()+timedelta(days=365)).isoformat(),
-        status="Active", created_at=now, account_mobile=mobile, account_email=email
+        status="Active", created_at=now, account_mobile=mobile, account_email=email,
+        terms_accepted=True, privacy_acknowledged=True, terms_version=data.terms_version.strip() or "1.0",
+        privacy_notice_version=data.privacy_notice_version.strip() or "1.0", legal_accepted_at=data.legal_accepted_at.strip() or now
     )
     admin=AdminUser(
         id=str(uuid4()), username=username, full_name=data.admin_name.strip(),
         email=email, mobile_no=mobile, role="Admin", created_at=now, updated_at=now,
-        tenant_id=tid, force_password_change=True, language_preference=data.language.strip() if data.language.strip() in {"English", "Telugu", "Hindi", "Tamil", "Kannada"} else "English"
+        tenant_id=tid, force_password_change=True, language_preference=data.language.strip() if data.language.strip() in {"English", "Hindi", "Telugu", "Tamil", "Kannada", "Malayalam", "Marathi", "Gujarati", "Bengali", "Punjabi", "Odia", "Urdu"} else "English"
     )
     tenant_accounts[tid]=account
     tenant_users[tid]=[admin]
@@ -2789,6 +2798,13 @@ def confirm_password_reset(data: PasswordResetConfirmInput):
         tenant_passwords[user.id]=new_hash
     user.locked=False; user.active=True; user.force_password_change=False
     user.updated_at=datetime.now().isoformat(timespec="seconds")
+    for canonical in admin_users:
+        if canonical.id == user.id:
+            canonical.locked=False; canonical.active=True; canonical.force_password_change=False; canonical.updated_at=user.updated_at
+    for tenant_user_list in tenant_users.values():
+        for canonical in tenant_user_list:
+            if canonical.id == user.id:
+                canonical.locked=False; canonical.active=True; canonical.force_password_change=False; canonical.updated_at=user.updated_at
     record["used"]=True
     failed_login_counts.pop(f"{user.tenant_id}:{user.username.casefold()}",None)
     failed_login_counts.pop(user.username.lower(),None)
@@ -2797,7 +2813,7 @@ def confirm_password_reset(data: PasswordResetConfirmInput):
     return {"message":"Password reset successful. You can now log in."}
 
 @app.post("/admin/auth/change-password", response_model=AdminUser)
-def change_own_password(data: ChangePasswordInput, x_apartcare_token: str | None = Header(default=None)):
+def change_own_password(data: ChangePasswordInput, background_tasks: BackgroundTasks, x_apartcare_token: str | None = Header(default=None)):
     user = _current_actor(x_apartcare_token)
     # This endpoint is intentionally available to Viewer/Admin/Supervisor only for changing their own password.
     # It must not be routed through the property write-role restriction.
@@ -2807,10 +2823,29 @@ def change_own_password(data: ChangePasswordInput, x_apartcare_token: str | None
     admin_passwords[user.id] = new_hash
     if user.tenant_id:
         tenant_passwords[user.id] = new_hash
+    now = datetime.now().isoformat(timespec="seconds")
     user.force_password_change = False
-    user.updated_at = datetime.now().isoformat(timespec="seconds")
-    _audit(user.username, "Success", "Password Changed", "First-time/own password changed", user.id)
-    _save_state()
+    user.updated_at = now
+    # Keep both registries synchronized. Login reads tenant_users while the
+    # session helper historically preferred admin_users; stale copies caused
+    # some users to be asked to change their password on every login.
+    for canonical in admin_users:
+        if canonical.id == user.id:
+            canonical.force_password_change = False
+            canonical.updated_at = now
+            canonical.active = user.active
+            canonical.locked = user.locked
+    for tenant_user_list in tenant_users.values():
+        for canonical in tenant_user_list:
+            if canonical.id == user.id:
+                canonical.force_password_change = False
+                canonical.updated_at = now
+                canonical.active = user.active
+                canonical.locked = user.locked
+    _audit(user.username, "Success", "Password Changed", "First-time/own password changed", user.id, getattr(user,"tenant_id",None))
+    # Password changes must return promptly; large tenant state (including
+    # apartment images) can make synchronous disk persistence exceed the UI timeout.
+    background_tasks.add_task(_save_state)
     return user
 
 @app.post("/admin/auth/logout")
@@ -2841,7 +2876,7 @@ def get_my_language_preference(x_apartcare_token: str | None = Header(default=No
     actor = _current_actor(x_apartcare_token)
     tenant = tenant_accounts.get(getattr(actor, "tenant_id", "")) if getattr(actor, "tenant_id", "") else None
     language = getattr(actor, "language_preference", "") or (tenant.language if tenant else "English") or "English"
-    if language not in {"English", "Telugu", "Hindi", "Tamil", "Kannada"}:
+    if language not in {"English", "Hindi", "Telugu", "Tamil", "Kannada", "Malayalam", "Marathi", "Gujarati", "Bengali", "Punjabi", "Odia", "Urdu"}:
         language = "English"
     # Keep the authenticated user object authoritative for future sessions while
     # preserving the tenant's language only as a fallback for legacy users.
@@ -2901,7 +2936,7 @@ def create_admin_user(data: AdminUserInput, background_tasks: BackgroundTasks, x
     now = datetime.now().isoformat(timespec="seconds")
     tenant_account = tenant_accounts.get(tenant_id)
     default_language = getattr(tenant_account, "language", "English") if tenant_account else "English"
-    if default_language not in {"English", "Telugu", "Hindi", "Tamil", "Kannada"}: default_language = "English"
+    if default_language not in {"English", "Hindi", "Telugu", "Tamil", "Kannada", "Malayalam", "Marathi", "Gujarati", "Bengali", "Punjabi", "Odia", "Urdu"}: default_language = "English"
     user = AdminUser(id=str(uuid4()), username=data.username.strip(), full_name=data.full_name.strip(), email=email, mobile_no=mobile, role=data.role, created_at=now, updated_at=now, force_password_change=True, tenant_id=tenant_id, language_preference=default_language)
     admin_users.append(user); admin_passwords[user.id] = _password_hash(data.password)
     if tenant_id:
@@ -3017,6 +3052,11 @@ class TenantAccount(BaseModel):
     created_at: str
     account_mobile: str = ""
     account_email: str = ""
+    terms_accepted: bool = False
+    privacy_acknowledged: bool = False
+    terms_version: str = ""
+    privacy_notice_version: str = ""
+    legal_accepted_at: str = ""
     # First operational month for this tenant. Existing tenants default to their
     # account creation month during migration; new tenants choose it at creation.
     data_start_month: str = ""
@@ -4298,7 +4338,7 @@ def _load_state():
         # stored on the user and never modify tenant/business data.
         for _tid, _users in tenant_users.items():
             _default_lang = getattr(tenant_accounts.get(_tid), 'language', 'English') or 'English'
-            if _default_lang not in {'English','Telugu','Hindi','Tamil','Kannada'}: _default_lang='English'
+            if _default_lang not in {'English','Hindi','Telugu','Tamil','Kannada','Malayalam','Marathi','Gujarati','Bengali','Punjabi','Odia','Urdu'}: _default_lang='English'
             for _u in _users:
                 if not getattr(_u, 'language_preference', ''): _u.language_preference = _default_lang
                 for _legacy in admin_users:
