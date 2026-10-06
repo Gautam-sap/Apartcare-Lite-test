@@ -34,7 +34,7 @@ except Exception:
 from email.message import EmailMessage
 from pydantic import BaseModel, Field, model_validator
 
-app = FastAPI(title="ApartCare2 API", version="6.5.20-PRODUCTION")
+app = FastAPI(title="ApartCare2 API", version="6.5.22-PRODUCTION")
 
 
 @app.middleware("http")
@@ -629,7 +629,7 @@ def health():
     if not persistent:
         return {
             "status": "ok",
-            "version": "6.5.20",
+            "version": "6.5.22",
             "storage": "local",
             "database": "not_configured",
             "production_ready": False,
@@ -646,7 +646,7 @@ def health():
             conn.close()
         return {
             "status": "ok",
-            "version": "6.5.20",
+            "version": "6.5.22",
             "storage": "postgres",
             "database": "connected",
             "production_ready": True,
@@ -654,7 +654,7 @@ def health():
     except Exception as exc:
         return JSONResponse(status_code=503, content={
             "status": "degraded",
-            "version": "6.5.20",
+            "version": "6.5.22",
             "storage": "postgres",
             "database": "unavailable",
             "production_ready": False,
@@ -2495,7 +2495,16 @@ def _current_actor(token: str | None) -> AdminUser:
     if not token or token not in auth_sessions:
         raise HTTPException(status_code=401, detail="Login session is required.")
     uid = auth_sessions[token]
-    user = next((u for u in admin_users if u.id == uid), None)
+    # V6.5.22: tenant_sessions is the authoritative namespace for property
+    # sessions. Never resolve a property actor by global admin_users first; that
+    # can return a stale legacy copy and makes per-user settings appear to cross
+    # apartment boundaries.
+    session_tenant = str(tenant_sessions.get(token, ("", ""))[0] or "")
+    user = None
+    if session_tenant:
+        user = next((u for u in tenant_users.get(session_tenant, []) if u.id == uid), None)
+    if user is None:
+        user = next((u for u in admin_users if u.id == uid), None)
     if user is None:
         for _tid, _users in tenant_users.items():
             user = next((u for u in _users if u.id == uid), None)
@@ -2503,7 +2512,10 @@ def _current_actor(token: str | None) -> AdminUser:
                 break
     if not user or not user.active or user.locked:
         auth_sessions.pop(token, None)
+        tenant_sessions.pop(token, None)
         raise HTTPException(status_code=403, detail="Your account is not allowed to perform this action.")
+    if session_tenant and str(getattr(user, "tenant_id", "") or "") != session_tenant:
+        raise HTTPException(status_code=403, detail="Authenticated user tenant context is invalid.")
     return user
 
 def _is_platform_support_token(token: str | None) -> bool:
@@ -2885,24 +2897,26 @@ def get_my_language_preference(x_apartcare_token: str | None = Header(default=No
     return {"tenant_id": getattr(actor, "tenant_id", ""), "user_id": actor.id, "language": language, "source": "user" if getattr(actor, "language_preference", "") else "tenant-default"}
 
 @app.put("/admin/me/language", response_model=AdminUser)
-def set_my_language_preference(data: UserLanguagePreferenceUpdate, x_apartcare_token: str | None = Header(default=None)):
+def set_my_language_preference(data: UserLanguagePreferenceUpdate, background_tasks: BackgroundTasks, x_apartcare_token: str | None = Header(default=None)):
     actor = _current_actor(x_apartcare_token)
     tenant_id = str(getattr(actor, "tenant_id", "") or "")
     if not tenant_id:
         raise HTTPException(status_code=403, detail="A tenant-scoped property user session is required.")
     actor.language_preference = data.language
     actor.updated_at = datetime.now().isoformat(timespec="seconds")
-    # Keep the canonical object in both legacy and tenant indexes synchronized.
-    for u in admin_users:
-        if u.id == actor.id:
-            u.language_preference = data.language
-            u.updated_at = actor.updated_at
+    # V6.5.22: language is a tenant-scoped user preference. Update only the
+    # authenticated tenant's user plus the matching legacy copy for the same
+    # tenant. Never search/update all tenants by user.id alone.
     for u in tenant_users.get(tenant_id, []):
         if u.id == actor.id:
             u.language_preference = data.language
             u.updated_at = actor.updated_at
+    for u in admin_users:
+        if u.id == actor.id and str(getattr(u, "tenant_id", "") or "") == tenant_id:
+            u.language_preference = data.language
+            u.updated_at = actor.updated_at
     _audit(actor.username, "Success", "Language Preference Updated", f"Language set to {data.language}", actor.id, tenant_id)
-    _save_state()
+    background_tasks.add_task(_save_state)
     return actor
 
 @app.get("/admin/session-timeouts", response_model=SessionTimeoutSettings)
