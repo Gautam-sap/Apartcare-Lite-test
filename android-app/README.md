@@ -15,3 +15,7 @@ npx cap open android
 ```
 
 For client distribution, prefer a signed AAB through Google Play. For controlled trials, a signed APK can be hosted at the URL configured by `NEXT_PUBLIC_ANDROID_APP_DOWNLOAD_URL`.
+
+## Test APK via GitHub Actions
+
+Use **Actions → Build ApartCare Android Test APK → Run workflow** and enter the deployed Vercel/Web URL. The workflow creates the Android project, syncs Capacitor, builds `app-debug.apk`, and uploads it as a downloadable artifact.

@@ -1,0 +1,59 @@
+name: Build ApartCare Android Test APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      web_url:
+        description: 'Deployed ApartCare Web URL (for example https://your-app.vercel.app)'
+        required: true
+        type: string
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android-app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: android-app/package.json
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Capacitor dependencies
+        run: npm install
+
+      - name: Generate Android project
+        env:
+          APARTCARE_WEB_URL: ${{ inputs.web_url }}
+        run: npx cap add android
+
+      - name: Sync Capacitor Android project
+        env:
+          APARTCARE_WEB_URL: ${{ inputs.web_url }}
+        run: npx cap sync android
+
+      - name: Build debug APK
+        working-directory: android-app/android
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apartcare-lite-v6.5.23-test-apk
+          path: android-app/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
