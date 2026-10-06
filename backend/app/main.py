@@ -3809,6 +3809,16 @@ def platform_create_account(data: PlatformTenantCreateInput, background_tasks: B
     # a temporary password and must change it on first login.
     admin=AdminUser(id=str(uuid4()),username=data.admin_username.strip(),full_name=data.admin_name.strip(),email=admin_email,mobile_no=admin_mobile,role="Admin",created_at=now,updated_at=now,tenant_id=tid,force_password_change=False)
     tenant_users[tid]=[admin]; tenant_passwords[admin.id]=_password_hash(data.password)
+    # PROD1: keep the tenant account master and operational Settings header in sync
+    # from day one. This does not alter financial calculations; it only seeds the
+    # tenant-scoped Settings record with the authoritative account identity.
+    charge_settings[tid]=ChargeSettings(
+        apartment_id=tid, tenant_id=tid, account_id=account.account_id,
+        account_mobile=account.account_mobile, apartment_name=account.apartment_name,
+        address=account.address, city=account.city, pin_code=account.pin_code,
+        state=account.state, country=account.country, language=account.language,
+        common_maintenance=0, cca=0, watchman_salary=0
+    )
     _create_subscription_for_tenant(tid, now, platform_owner.username if platform_owner else "system")
     if admin_email:
         background_tasks.add_task(_send_welcome_email, account.account_id, account.apartment_name, admin.full_name, admin.username, admin_email)
