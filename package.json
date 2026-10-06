@@ -1,6 +1,6 @@
 {
   "name": "apartcare-lite",
-  "version": "6.5.22",
+  "version": "6.5.23",
   "private": true,
   "scripts": {
     "dev": "next dev",

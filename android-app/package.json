@@ -1,0 +1,1 @@
+{"name":"apartcare-lite-android","private":true,"version":"6.5.23","scripts":{"sync":"npx cap sync android","open":"npx cap open android","build":"npx cap sync android && npx cap open android"},"dependencies":{"@capacitor/android":"^7.4.0","@capacitor/core":"^7.4.0"},"devDependencies":{"@capacitor/cli":"^7.4.0"}}
