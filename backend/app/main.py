@@ -34,7 +34,7 @@ except Exception:
 from email.message import EmailMessage
 from pydantic import BaseModel, Field, model_validator
 
-app = FastAPI(title="ApartCare2 API", version="6.5.14-PRODUCTION-STABILIZATION")
+app = FastAPI(title="ApartCare2 API", version="6.5.20-PRODUCTION")
 
 
 @app.middleware("http")
@@ -428,6 +428,9 @@ class AdminUserInput(BaseModel):
     role: Literal["Super Admin", "Admin", "Viewer", "Supervisor", "Caretaker"] = "Viewer"
     password: str = Field(min_length=8, max_length=128)
 
+class UserLanguagePreferenceUpdate(BaseModel):
+    language: Literal["English", "Telugu", "Hindi", "Tamil", "Kannada"] = "English"
+
 class AdminUserUpdate(BaseModel):
     full_name: str | None = Field(default=None, min_length=1, max_length=100)
     role: Literal["Super Admin", "Admin", "Viewer", "Supervisor", "Caretaker"] | None = None
@@ -465,6 +468,7 @@ class AdminUser(BaseModel):
     locked: bool = False
     force_password_change: bool = False
     tenant_id: str = ""
+    language_preference: str = "English"
     created_at: str
     updated_at: str
 
@@ -620,7 +624,7 @@ def health():
     if not persistent:
         return {
             "status": "ok",
-            "version": "6.5.14",
+            "version": "6.5.20",
             "storage": "local",
             "database": "not_configured",
             "production_ready": False,
@@ -637,7 +641,7 @@ def health():
             conn.close()
         return {
             "status": "ok",
-            "version": "6.5.14",
+            "version": "6.5.20",
             "storage": "postgres",
             "database": "connected",
             "production_ready": True,
@@ -645,7 +649,7 @@ def health():
     except Exception as exc:
         return JSONResponse(status_code=503, content={
             "status": "degraded",
-            "version": "6.5.14",
+            "version": "6.5.20",
             "storage": "postgres",
             "database": "unavailable",
             "production_ready": False,
@@ -2604,7 +2608,7 @@ def create_apartment_account(data: ApartmentAccountCreateInput, background_tasks
     admin=AdminUser(
         id=str(uuid4()), username=username, full_name=data.admin_name.strip(),
         email=email, mobile_no=mobile, role="Admin", created_at=now, updated_at=now,
-        tenant_id=tid, force_password_change=True
+        tenant_id=tid, force_password_change=True, language_preference=data.language.strip() if data.language.strip() in {"English", "Telugu", "Hindi", "Tamil", "Kannada"} else "English"
     )
     tenant_accounts[tid]=account
     tenant_users[tid]=[admin]
@@ -2641,84 +2645,84 @@ def create_apartment_account(data: ApartmentAccountCreateInput, background_tasks
 @app.post("/admin/auth/login", response_model=AuthLoginResponse)
 def admin_login(data: AdminLoginInput, background_tasks: BackgroundTasks, account_id: str = ""):
     supplied_account=account_id.strip()
-    # New multi-apartment accounts are authenticated by their own tenant record.
-    # Account numbers must be unique, but older state files may contain duplicate
-    # numbers. Never pick the first match because that can silently open Account A
-    # while the user intended Account B. If duplicates exist, resolve by the
-    # supplied user/password; if still ambiguous, fail closed.
-    matching_accounts=[a for a in tenant_accounts.values() if a.account_id.casefold()==supplied_account.casefold()] if supplied_account else []
+    supplied_identity=data.username.strip().casefold()
+    password_hash=_password_hash(data.password)
+
+    def identity_matches(u: AdminUser, identity: str) -> bool:
+        values=[u.username, u.email, u.mobile_no]
+        return any(str(v or '').strip().casefold()==identity for v in values)
+
+    def valid_user_for_account(account: TenantAccount):
+        for candidate_user in tenant_users.get(account.tenant_id, []):
+            if identity_matches(candidate_user, supplied_identity) and candidate_user.active and not candidate_user.locked and tenant_passwords.get(candidate_user.id)==password_hash:
+                return candidate_user
+        return None
+
     tenant_account=None; user=None
-    if matching_accounts:
-        supplied_username=data.username.strip().casefold()
+    if supplied_account:
+        matching_accounts=[a for a in tenant_accounts.values() if a.account_id.casefold()==supplied_account.casefold()]
+        if matching_accounts:
+            valid_matches=[]
+            for candidate in matching_accounts:
+                candidate_user=valid_user_for_account(candidate)
+                if candidate_user:
+                    valid_matches.append((candidate,candidate_user))
+            if len(valid_matches)==1:
+                tenant_account,user=valid_matches[0]
+            elif len(valid_matches)>1:
+                raise HTTPException(status_code=409, detail={"message":"More than one apartment matches these credentials.","accounts":[{"tenant_id":a.tenant_id,"account_id":a.account_id,"apartment_name":a.apartment_name,"city":a.city,"state":a.state} for a,u in valid_matches]})
+            else:
+                raise HTTPException(status_code=401, detail="Invalid User ID, Email, Mobile Number or password.")
+    else:
+        # Account Number is optional. Resolve against every tenant using the
+        # registered User ID, Email or Mobile Number plus password. Only valid
+        # credential matches are returned, so the account list does not expose
+        # apartments merely because an identifier exists in the system.
         valid_matches=[]
-        for candidate in matching_accounts:
-            candidate_user=next((u for u in tenant_users.get(candidate.tenant_id,[]) if u.username.casefold()==supplied_username or (u.email and u.email.casefold()==supplied_username)),None)
-            if candidate_user and not candidate_user.locked and candidate_user.active and tenant_passwords.get(candidate_user.id)==_password_hash(data.password):
+        for candidate in tenant_accounts.values():
+            candidate_user=valid_user_for_account(candidate)
+            if candidate_user:
                 valid_matches.append((candidate,candidate_user))
         if len(valid_matches)==1:
             tenant_account,user=valid_matches[0]
         elif len(valid_matches)>1:
-            raise HTTPException(status_code=409, detail="This Account Number exists for more than one apartment with the same User ID and password. Please have the Platform Owner repair the duplicate Account Number before continuing.")
-        else:
-            # Preserve the normal invalid-credential response without revealing
-            # which tenant records exist.
-            raise HTTPException(status_code=401, detail="Invalid User ID or password.")
+            raise HTTPException(status_code=409, detail={"message":"These credentials match more than one apartment.","accounts":[{"tenant_id":a.tenant_id,"account_id":a.account_id,"apartment_name":a.apartment_name,"city":a.city,"state":a.state} for a,u in valid_matches]})
+        elif tenant_accounts:
+            # Keep the response generic when the identifier/password pair does
+            # not resolve to an active tenant user.
+            raise HTTPException(status_code=401, detail="Invalid User ID, Email, Mobile Number or password.")
+
     if tenant_account:
         if tenant_account.status!="Active" or tenant_account.valid_from>date.today().isoformat() or tenant_account.valid_to<date.today().isoformat():
             raise HTTPException(status_code=403, detail="Property account is not currently active.")
-        user.tenant_id = tenant_account.tenant_id
+        user.tenant_id=tenant_account.tenant_id
         failed_key=f"{tenant_account.tenant_id}:{user.username.casefold()}"
-        if tenant_passwords.get(user.id)!=_password_hash(data.password):
-            failed_login_counts[failed_key]=failed_login_counts.get(failed_key,0)+1
-            _audit(user.username,"Failed","Login",f"Invalid password; Tenant {tenant_account.account_id}",user.id,tenant_account.tenant_id)
-            _save_state()
-            if failed_login_counts[failed_key] >= 5:
-                user.locked=True; user.updated_at=datetime.now().isoformat(timespec="seconds")
-                _audit(user.username,"Blocked","Account Locked",f"Five consecutive failed login attempts; Tenant {tenant_account.account_id}",user.id,tenant_account.tenant_id)
-                raise HTTPException(status_code=403, detail="Account locked after repeated failed login attempts. Contact an Administrator.")
-            raise HTTPException(status_code=401, detail="Invalid User ID or password.")
         failed_login_counts.pop(failed_key,None)
         token=secrets.token_urlsafe(32); auth_sessions[token]=user.id; tenant_sessions[token]=(tenant_account.tenant_id,user.id)
         _audit(user.username,"Success","Login",f"Tenant {tenant_account.account_id}",user.id,tenant_account.tenant_id)
         background_tasks.add_task(_save_state)
         return {"user":user,"token":token,"account":_account_payload(tenant_account)}
+
+    # Legacy single-account/demo state retained for backwards compatibility.
     settings=charge_settings.get("demo-apartment", ChargeSettings())
     expected=getattr(settings,"account_id", "")
     if expected and supplied_account.upper()!=expected.upper():
         raise HTTPException(status_code=401, detail="Invalid Account ID or credentials.")
-    # Accept the current stored username/email plus the legacy PRKNM_* aliases
-    # used by earlier local test builds. This keeps existing state data intact.
-    supplied_username = data.username.strip()
-    normalized_username = supplied_username.casefold()
-    username_candidates = {normalized_username}
-    if normalized_username.startswith("prknm_") and len(normalized_username) > 6:
+    normalized_username=data.username.strip().casefold()
+    username_candidates={normalized_username}
+    if normalized_username.startswith("prknm_") and len(normalized_username)>6:
         username_candidates.add(normalized_username[6:])
     else:
         username_candidates.add(f"prknm_{normalized_username}")
-    user = next((u for u in admin_users if u.username.casefold() in username_candidates or (u.email and u.email.casefold() == normalized_username)), None)
-    if not user:
-        _audit(data.username, "Failed", "Login", "Unknown user")
-        raise HTTPException(status_code=401, detail="Invalid User ID or password")
-    if not user.active:
-        _audit(user.username, "Blocked", "Login", "User is deactivated", user.id)
-        raise HTTPException(status_code=403, detail="User is deactivated")
-    if user.locked:
-        _audit(user.username, "Blocked", "Login", "User is locked", user.id)
-        raise HTTPException(status_code=403, detail="User is locked")
-    if admin_passwords.get(user.id) != _password_hash(data.password):
-        key=user.username.lower(); failed_login_counts[key]=failed_login_counts.get(key,0)+1
-        _audit(user.username, "Failed", "Login", "Invalid password", user.id)
-        _save_state()
-        if failed_login_counts[key] >= 5:
-            user.locked=True; user.updated_at=datetime.now().isoformat(timespec="seconds")
-            _audit(user.username, "Blocked", "Account Locked", "Five consecutive failed login attempts", user.id)
-            raise HTTPException(status_code=403, detail="Account locked after repeated failed login attempts. Contact an Administrator.")
-        raise HTTPException(status_code=401, detail="Invalid User ID or password")
-    failed_login_counts.pop(user.username.lower(), None)
-    token = secrets.token_urlsafe(32); auth_sessions[token] = user.id
-    _audit(user.username, "Success", "Login", user_id=user.id)
+    user=next((u for u in admin_users if u.username.casefold() in username_candidates or (u.email and u.email.casefold()==normalized_username) or (u.mobile_no and u.mobile_no.strip().casefold()==normalized_username)),None)
+    if not user or tenant_passwords.get(user.id)!=password_hash:
+        _audit(data.username,"Failed","Login","Unknown user or invalid credentials")
+        raise HTTPException(status_code=401, detail="Invalid User ID, Email, Mobile Number or password")
+    token=secrets.token_urlsafe(32); auth_sessions[token]=user.id
+    _audit(user.username,"Success","Login","Legacy account",user.id,user.tenant_id or None)
     background_tasks.add_task(_save_state)
-    return AuthLoginResponse(user=user, token=token, account={"tenant_id":"demo-apartment","account_id":getattr(settings,"account_id",""),"apartment_name":settings.apartment_name})
+    return {"user":user,"token":token,"account":None}
+
 
 @app.post("/admin/auth/request-password-reset")
 def request_password_reset(data: PasswordResetRequestInput):
@@ -2832,6 +2836,40 @@ def list_admin_users(x_apartcare_token: str | None = Header(default=None)):
     rows=list(tenant_users.get(tenant_id, [])) if tenant_id else [u for u in admin_users if not getattr(u,"tenant_id","")]
     return sorted(rows, key=lambda u: (u.role != "Admin", u.username.lower()))
 
+@app.get("/admin/me/language", response_model=dict)
+def get_my_language_preference(x_apartcare_token: str | None = Header(default=None)):
+    actor = _current_actor(x_apartcare_token)
+    tenant = tenant_accounts.get(getattr(actor, "tenant_id", "")) if getattr(actor, "tenant_id", "") else None
+    language = getattr(actor, "language_preference", "") or (tenant.language if tenant else "English") or "English"
+    if language not in {"English", "Telugu", "Hindi", "Tamil", "Kannada"}:
+        language = "English"
+    # Keep the authenticated user object authoritative for future sessions while
+    # preserving the tenant's language only as a fallback for legacy users.
+    if not getattr(actor, "language_preference", ""):
+        actor.language_preference = language
+    return {"tenant_id": getattr(actor, "tenant_id", ""), "user_id": actor.id, "language": language, "source": "user" if getattr(actor, "language_preference", "") else "tenant-default"}
+
+@app.put("/admin/me/language", response_model=AdminUser)
+def set_my_language_preference(data: UserLanguagePreferenceUpdate, x_apartcare_token: str | None = Header(default=None)):
+    actor = _current_actor(x_apartcare_token)
+    tenant_id = str(getattr(actor, "tenant_id", "") or "")
+    if not tenant_id:
+        raise HTTPException(status_code=403, detail="A tenant-scoped property user session is required.")
+    actor.language_preference = data.language
+    actor.updated_at = datetime.now().isoformat(timespec="seconds")
+    # Keep the canonical object in both legacy and tenant indexes synchronized.
+    for u in admin_users:
+        if u.id == actor.id:
+            u.language_preference = data.language
+            u.updated_at = actor.updated_at
+    for u in tenant_users.get(tenant_id, []):
+        if u.id == actor.id:
+            u.language_preference = data.language
+            u.updated_at = actor.updated_at
+    _audit(actor.username, "Success", "Language Preference Updated", f"Language set to {data.language}", actor.id, tenant_id)
+    _save_state()
+    return actor
+
 @app.get("/admin/session-timeouts", response_model=SessionTimeoutSettings)
 def get_session_timeouts():
     return session_timeout_settings
@@ -2861,7 +2899,10 @@ def create_admin_user(data: AdminUserInput, background_tasks: BackgroundTasks, x
     if mobile and len([c for c in mobile if c.isdigit()]) < 7:
         raise HTTPException(status_code=422, detail="Enter a valid Mobile Number.")
     now = datetime.now().isoformat(timespec="seconds")
-    user = AdminUser(id=str(uuid4()), username=data.username.strip(), full_name=data.full_name.strip(), email=email, mobile_no=mobile, role=data.role, created_at=now, updated_at=now, force_password_change=True, tenant_id=tenant_id)
+    tenant_account = tenant_accounts.get(tenant_id)
+    default_language = getattr(tenant_account, "language", "English") if tenant_account else "English"
+    if default_language not in {"English", "Telugu", "Hindi", "Tamil", "Kannada"}: default_language = "English"
+    user = AdminUser(id=str(uuid4()), username=data.username.strip(), full_name=data.full_name.strip(), email=email, mobile_no=mobile, role=data.role, created_at=now, updated_at=now, force_password_change=True, tenant_id=tenant_id, language_preference=default_language)
     admin_users.append(user); admin_passwords[user.id] = _password_hash(data.password)
     if tenant_id:
         tenant_users.setdefault(tenant_id, []).append(user)
@@ -3678,7 +3719,7 @@ def platform_support_session(tenant_id: str, x_auth_token: str | None = Header(d
     user=next((u for u in tenant_users.get(tenant_id,[]) if u.role=="Admin"), None)
     if user is None:
         raise HTTPException(status_code=404, detail="No Administrator exists for this property account.")
-    support_user=AdminUser(id=f"support-{uuid4()}",username=f"PLATFORM_AUDIT_{account.account_id}",full_name=f"Platform Owner — {account.apartment_name}",email=actor.email,mobile_no=actor.mobile_no,role="Viewer",active=True,locked=False,tenant_id=tenant_id,created_at=datetime.now().isoformat(timespec="seconds"),updated_at=datetime.now().isoformat(timespec="seconds"))
+    support_user=AdminUser(id=f"support-{uuid4()}",username=f"PLATFORM_AUDIT_{account.account_id}",full_name=f"Platform Owner — {account.apartment_name}",email=actor.email,mobile_no=actor.mobile_no,role="Viewer",active=True,locked=False,tenant_id=tenant_id,language_preference=getattr(account,"language","English") or "English",created_at=datetime.now().isoformat(timespec="seconds"),updated_at=datetime.now().isoformat(timespec="seconds"))
     token=secrets.token_urlsafe(32)
     platform_support_sessions[token]=(tenant_id,support_user)
     platform_audit.append({"at":datetime.now().isoformat(timespec="seconds"),"event":"Apartment Audit/Support Session Started","actor":actor.username,"detail":f"{account.account_id} ({account.apartment_name}); read-only"})
@@ -4252,6 +4293,18 @@ def _load_state():
                 _settings.apartment_id = _tid
 
         tenant_account_validity_history=[TenantAccountValidityHistory(**x) for x in d.get('tenant_account_validity_history',[])]; tenant_users={k:[AdminUser(**u) for u in v] for k,v in d.get('tenant_users',{}).items()}; tenant_passwords=d.get('tenant_passwords',{}); platform_audit=d.get('platform_audit',[]); auth_sessions=dict(d.get('auth_sessions',{}))
+        # V6.5.19: migrate legacy users to a user-level language preference.
+        # Existing users inherit the tenant default once; subsequent changes are
+        # stored on the user and never modify tenant/business data.
+        for _tid, _users in tenant_users.items():
+            _default_lang = getattr(tenant_accounts.get(_tid), 'language', 'English') or 'English'
+            if _default_lang not in {'English','Telugu','Hindi','Tamil','Kannada'}: _default_lang='English'
+            for _u in _users:
+                if not getattr(_u, 'language_preference', ''): _u.language_preference = _default_lang
+                for _legacy in admin_users:
+                    if _legacy.id == _u.id:
+                        _legacy.language_preference = _u.language_preference
+                        break
         platform_sessions=dict(d.get('platform_sessions',{}))
         tenant_sessions={k:tuple(v) for k,v in d.get('tenant_sessions',{}).items()}
         platform_support_sessions={k:(v.get('tenant_id',''),AdminUser(**v.get('user',{}))) for k,v in d.get('platform_support_sessions',{}).items() if v.get('user')}
